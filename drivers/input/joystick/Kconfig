@@ -383,4 +383,16 @@ config JOYSTICK_FSIA6B
 	  To compile this driver as a module, choose M here: the
 	  module will be called fsia6b.
 
+config JOYSTICK_RG56PRO
+	tristate "RG56 Pro built-in gamepad"
+	depends on IIO
+	help
+	  Say Y here if you have an Anbernic RG56 Pro handheld and want
+	  to use its built-in gamepad. The driver reads analog sticks and
+	  triggers via SARADC IIO channels, ADC-threshold buttons, and
+	  GPIO-connected buttons.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called rg56pro-joystick.
+
 endif
