@@ -1025,7 +1025,6 @@ static void _hal_send(struct hal_priv  *priv,
 static void _hal_send_head(struct hal_priv  *priv,
 			  struct sk_buff   *skb)
 {
-	printk("%s: qhead.\n", __func__);
 	skb_queue_head(&priv->txq, skb);
 	//tasklet_schedule(&priv->tx_tasklet);
 	hal_tx_queue_work(priv);

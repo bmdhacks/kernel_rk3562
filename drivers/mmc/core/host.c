@@ -224,7 +224,7 @@ int mmc_of_parse(struct mmc_host *host)
 	struct device *dev = host->parent;
 	u32 bus_width, drv_type, cd_debounce_delay_ms;
 	int ret;
-printk("bruce test ----000 .\n");
+
 	if (!dev || !dev_fwnode(dev))
 		return 0;
 
@@ -234,7 +234,7 @@ printk("bruce test ----000 .\n");
 			"\"bus-width\" property is missing, assuming 1 bit.\n");
 		bus_width = 1;
 	}
-printk("bruce test ---- 3333.\n");
+
 	switch (bus_width) {
 	case 8:
 		host->caps |= MMC_CAP_8_BIT_DATA;
@@ -249,7 +249,7 @@ printk("bruce test ---- 3333.\n");
 			"Invalid \"bus-width\" value %u!\n", bus_width);
 		return -EINVAL;
 	}
-printk("bruce test ---- 4444.\n");
+
 	/* f_max is obtained from the optional "max-frequency" property */
 	device_property_read_u32(dev, "max-frequency", &host->f_max);
 
@@ -287,7 +287,7 @@ printk("bruce test ---- 4444.\n");
 		else if (ret != -ENOENT && ret != -ENOSYS)
 			return ret;
 	}
-printk("bruce test ----5555 .\n");
+
 	/* Parse Write Protection */
 
 	if (device_property_read_bool(dev, "wp-inverted"))
@@ -366,13 +366,10 @@ printk("bruce test ----5555 .\n");
 			dev_err(host->parent,
 				"can't use fixed driver type, media is removable\n");
 	}
-	printk("bruce test ---- 666.\n");
 	if (device_property_read_bool(dev, "supports-sd"))
 		host->restrict_caps |= RESTRICT_CARD_TYPE_SD;
-	if (device_property_read_bool(dev, "supports-sdio")){
+	if (device_property_read_bool(dev, "supports-sdio"))
 		host->restrict_caps |= RESTRICT_CARD_TYPE_SDIO;
-		printk("bruce test ---- 11.\n");
-		}
 	if (device_property_read_bool(dev, "supports-emmc"))
 		host->restrict_caps |= RESTRICT_CARD_TYPE_EMMC;
 
@@ -588,10 +585,8 @@ int mmc_add_host(struct mmc_host *host)
 #ifdef CONFIG_DEBUG_FS
 	mmc_add_host_debugfs(host);
 #endif
-	printk("bruce test ---- 222.\n");
-	if (host->restrict_caps & RESTRICT_CARD_TYPE_SDIO){
+	if (host->restrict_caps & RESTRICT_CARD_TYPE_SDIO)
 		primary_sdio_host = host;
-	}
 
 	mmc_start_host(host);
 	return 0;
@@ -657,7 +652,7 @@ int mmc_host_rescan(struct mmc_host *host, int val, int is_cap_sdio_irq)
 			pr_info("%s: mmc_host_rescan pass in host from argument!\n",
 				mmc_hostname(host));
 	} else {
-		pr_err("bruce --- sdio: host isn't  initialization successfully.\n");
+		pr_err("sdio: primary host not initialized\n");
 		return -ENOMEDIUM;
 	}
 

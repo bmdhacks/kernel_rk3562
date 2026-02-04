@@ -88,7 +88,6 @@ int _sdio_reset(struct host_io_info *host)
 	sdio_reset = true;
 //	mmc_debug_level = 0xFFFF;
 
-	printk(" start _sdio_reset ... \n");
 	mdelay(2000);
 
 	if (sdio_reset_comm(func->card))
