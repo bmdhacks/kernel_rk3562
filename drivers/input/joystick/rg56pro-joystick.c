@@ -27,6 +27,7 @@
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
 #include <linux/pm.h>
+#include <linux/delay.h>
 
 #define DRIVER_NAME	"rg56pro-joystick"
 
@@ -48,8 +49,21 @@
 /* Axis-to-dpad threshold: ~55% of 32767 ≈ 18000 */
 #define DPAD_THRESHOLD	18000
 
-/* Default debounce interval in ms (manufacturer hardcodes 10 despite DT 100) */
-#define DEFAULT_DEBOUNCE_MS	10
+/* Default debounce interval in ms — silicone-dampened microswitches settle in 1-3ms */
+#define DEFAULT_DEBOUNCE_MS	5
+
+/* Auto-calibration parameters */
+#define CALIBRATION_SAMPLES	16	/* readings to average at probe */
+#define CALIBRATION_DELAY_US	1000	/* 1ms between samples */
+
+/* Stick: dead zone is center ± this margin (in microvolts) */
+#define STICK_DZ_MARGIN_UV	110000	/* 110mV — matches DT's ~110mV half-width */
+
+/* Trigger: consistent fully-pressed floor (in microvolts) */
+#define TRIG_MIN_UV		11000	/* 11mV observed */
+/* Trigger: calibrated fuzz/flat (much smaller than pre-calibration values) */
+#define TRIG_FLAT_CALIBRATED	512
+#define TRIG_FUZZ_CALIBRATED	64
 
 /* DTS key codes that need remapping to BTN_* range for joydev visibility */
 #define KEY_HOME_DTS	102
@@ -85,12 +99,12 @@ struct rg56pro_joystick {
 	/* Stick calibration (millivolts from DTS, converted to microvolts) */
 	int axis_min_uv;
 	int axis_max_uv;
-	int axis_dz_lo_uv;  /* dead zone low */
-	int axis_dz_hi_uv;  /* dead zone high */
+	int axis_dz_lo_uv[NUM_STICK_CHANS];  /* per-axis dead zone low */
+	int axis_dz_hi_uv[NUM_STICK_CHANS];  /* per-axis dead zone high */
 
 	/* Trigger calibration (millivolts from DTS, converted to microvolts) */
 	int trig_min_uv;
-	int trig_max_uv;
+	int trig_max_uv[NUM_TRIG_CHANS];  /* per-trigger resting voltage */
 
 	/* Axis inversion flags */
 	bool lx_swap;
@@ -159,10 +173,13 @@ static unsigned int rg56pro_stick_code(struct rg56pro_joystick *joy, int i)
 
 /*
  * Map a raw microvolt ADC reading to the [-32767, 32767] axis range.
- * Values within the dead zone map to 0.
+ * Values within the per-axis dead zone map to 0.
  */
-static int rg56pro_map_stick(struct rg56pro_joystick *joy, int uv, bool swap)
+static int rg56pro_map_stick(struct rg56pro_joystick *joy, int uv,
+			     int axis, bool swap)
 {
+	int dz_lo = joy->axis_dz_lo_uv[axis];
+	int dz_hi = joy->axis_dz_hi_uv[axis];
 	int val;
 
 	/* Clamp to calibration range */
@@ -172,17 +189,17 @@ static int rg56pro_map_stick(struct rg56pro_joystick *joy, int uv, bool swap)
 		uv = joy->axis_max_uv;
 
 	/* Dead zone → 0 */
-	if (uv >= joy->axis_dz_lo_uv && uv <= joy->axis_dz_hi_uv)
+	if (uv >= dz_lo && uv <= dz_hi)
 		return 0;
 
-	if (uv < joy->axis_dz_lo_uv) {
+	if (uv < dz_lo) {
 		/* Below dead zone: map [min, dz_lo] → [-32767, 0] */
-		val = (int)((long long)(uv - joy->axis_dz_lo_uv) * 32767 /
-			    (joy->axis_dz_lo_uv - joy->axis_min_uv));
+		val = (int)((long long)(uv - dz_lo) * 32767 /
+			    (dz_lo - joy->axis_min_uv));
 	} else {
 		/* Above dead zone: map [dz_hi, max] → [0, 32767] */
-		val = (int)((long long)(uv - joy->axis_dz_hi_uv) * 32767 /
-			    (joy->axis_max_uv - joy->axis_dz_hi_uv));
+		val = (int)((long long)(uv - dz_hi) * 32767 /
+			    (joy->axis_max_uv - dz_hi));
 	}
 
 	if (swap)
@@ -198,18 +215,21 @@ static int rg56pro_map_stick(struct rg56pro_joystick *joy, int uv, bool swap)
 
 /*
  * Map a raw microvolt reading to the [0, 32767] trigger range.
+ * Uses per-trigger resting voltage as the max.
  */
-static int rg56pro_map_trigger(struct rg56pro_joystick *joy, int uv)
+static int rg56pro_map_trigger(struct rg56pro_joystick *joy, int uv, int trig)
 {
+	int trig_max = joy->trig_max_uv[trig];
 	int val;
 
 	if (uv < joy->trig_min_uv)
 		uv = joy->trig_min_uv;
-	if (uv > joy->trig_max_uv)
-		uv = joy->trig_max_uv;
+	if (uv > trig_max)
+		uv = trig_max;
 
-	val = (int)((long long)(uv - joy->trig_min_uv) * 32767 /
-		    (joy->trig_max_uv - joy->trig_min_uv));
+	/* Triggers are pull-up: high voltage = released, low = pressed */
+	val = (int)((long long)(trig_max - uv) * 32767 /
+		    (trig_max - joy->trig_min_uv));
 
 	if (val < TRIG_MIN)
 		val = TRIG_MIN;
@@ -367,7 +387,7 @@ static void rg56pro_poll(struct input_dev *input)
 		else if (i == 3)
 			swap = joy->ry_swap;
 
-		stick_vals[i] = rg56pro_map_stick(joy, raw, swap);
+		stick_vals[i] = rg56pro_map_stick(joy, raw, i, swap);
 	}
 
 	/* Step 2: Read and report triggers */
@@ -378,7 +398,7 @@ static void rg56pro_poll(struct input_dev *input)
 
 		raw *= 1000;
 		input_report_abs(input, trig_abs_codes[i],
-				 rg56pro_map_trigger(joy, raw));
+				 rg56pro_map_trigger(joy, raw, i));
 	}
 
 	/* Step 3: Read and report ADC-threshold buttons */
@@ -435,6 +455,99 @@ static void rg56pro_poll(struct input_dev *input)
 
 	/* Step 7: Single sync */
 	input_sync(input);
+}
+
+/* --- Auto-calibration --- */
+
+/*
+ * Read an IIO channel @samples times and return the average in millivolts.
+ * Discards the first reading as a warm-up. Returns negative on error.
+ */
+static int rg56pro_read_avg(struct iio_channel *chan, int samples)
+{
+	int i, ret, val;
+	long sum = 0;
+	int count = 0;
+
+	/* Warm-up read (discarded) */
+	ret = iio_read_channel_processed(chan, &val);
+	if (ret < 0)
+		return ret;
+	udelay(CALIBRATION_DELAY_US);
+
+	for (i = 0; i < samples; i++) {
+		ret = iio_read_channel_processed(chan, &val);
+		if (ret < 0)
+			return ret;
+		sum += val;
+		count++;
+		if (i < samples - 1)
+			udelay(CALIBRATION_DELAY_US);
+	}
+
+	return (int)(sum / count);  /* millivolts */
+}
+
+/*
+ * Calibrate stick dead zones and trigger max values by reading ADC channels
+ * at rest (nothing pressed). Must be called after IIO channels are acquired
+ * and before input device registration.
+ */
+static void rg56pro_calibrate(struct rg56pro_joystick *joy)
+{
+	struct device *dev = joy->dev;
+	int i, center_mv, rest_mv;
+
+	/* Calibrate stick dead zones */
+	for (i = 0; i < NUM_STICK_CHANS; i++) {
+		center_mv = rg56pro_read_avg(joy->stick_chans[i],
+					     CALIBRATION_SAMPLES);
+		if (center_mv < 0) {
+			dev_warn(dev, "Stick %d: calibration read failed (%d), using DT defaults\n",
+				 i, center_mv);
+			continue;
+		}
+
+		/* Validate: center should be well within the physical range */
+		if (center_mv * 1000 < joy->axis_min_uv + 200000 ||
+		    center_mv * 1000 > joy->axis_max_uv - 200000) {
+			dev_warn(dev, "Stick %d: center %d mV outside safe range [%d, %d] mV, using DT defaults\n",
+				 i, center_mv,
+				 (joy->axis_min_uv + 200000) / 1000,
+				 (joy->axis_max_uv - 200000) / 1000);
+			continue;
+		}
+
+		joy->axis_dz_lo_uv[i] = center_mv * 1000 - STICK_DZ_MARGIN_UV;
+		joy->axis_dz_hi_uv[i] = center_mv * 1000 + STICK_DZ_MARGIN_UV;
+
+		dev_info(dev, "Stick %d: center %d mV, dead zone [%d, %d] mV\n",
+			 i, center_mv,
+			 joy->axis_dz_lo_uv[i] / 1000,
+			 joy->axis_dz_hi_uv[i] / 1000);
+	}
+
+	/* Calibrate trigger resting voltages */
+	for (i = 0; i < NUM_TRIG_CHANS; i++) {
+		rest_mv = rg56pro_read_avg(joy->trig_chans[i],
+					   CALIBRATION_SAMPLES);
+		if (rest_mv < 0) {
+			dev_warn(dev, "Trigger %d: calibration read failed (%d), using DT default\n",
+				 i, rest_mv);
+			continue;
+		}
+
+		/* Validate: rest voltage should be reasonably high (trigger not stuck) */
+		if (rest_mv < 400) {
+			dev_warn(dev, "Trigger %d: rest %d mV too low (stuck/pressed at boot?), using DT default\n",
+				 i, rest_mv);
+			continue;
+		}
+
+		joy->trig_max_uv[i] = rest_mv * 1000;
+
+		dev_info(dev, "Trigger %d: rest %d mV\n", i, rest_mv);
+	}
 }
 
 /* --- DT parsing --- */
@@ -534,7 +647,7 @@ static int rg56pro_probe(struct platform_device *pdev)
 	struct rg56pro_joystick *joy;
 	struct input_dev *input;
 	u32 gpio_codes[NUM_GPIO_BTNS];
-	u32 poll_interval = 16;
+	u32 poll_interval = 8;
 	u32 debounce_ms = DEFAULT_DEBOUNCE_MS;
 	int axis_min_mv, axis_max_mv, dz_lo_mv, dz_hi_mv;
 	int trig_min_mv, trig_max_mv;
@@ -550,7 +663,9 @@ static int rg56pro_probe(struct platform_device *pdev)
 	/* --- Parse DT properties --- */
 
 	of_property_read_u32(dev->of_node, "poll-interval", &poll_interval);
-	of_property_read_u32(dev->of_node, "debounce-interval", &debounce_ms);
+	/* Ignore DT debounce-interval (100ms) — manufacturer's own driver
+	 * hardcoded 10ms instead of using it. 5ms is correct for silicone-
+	 * dampened microswitches. */
 	joy->debounce_ms = debounce_ms;
 
 	/* Axis inversion */
@@ -577,8 +692,11 @@ static int rg56pro_probe(struct platform_device *pdev)
 
 	joy->axis_min_uv = axis_min_mv * 1000;
 	joy->axis_max_uv = axis_max_mv * 1000;
-	joy->axis_dz_lo_uv = dz_lo_mv * 1000;
-	joy->axis_dz_hi_uv = dz_hi_mv * 1000;
+	/* Set DT dead zone as default for all axes (calibration overwrites) */
+	for (i = 0; i < NUM_STICK_CHANS; i++) {
+		joy->axis_dz_lo_uv[i] = dz_lo_mv * 1000;
+		joy->axis_dz_hi_uv[i] = dz_hi_mv * 1000;
+	}
 
 	/* Trigger calibration */
 	if (of_property_read_u32(dev->of_node, "l2-r2-min-value-mv",
@@ -588,8 +706,10 @@ static int rg56pro_probe(struct platform_device *pdev)
 				 &trig_max_mv))
 		trig_max_mv = 800;
 
-	joy->trig_min_uv = trig_min_mv * 1000;
-	joy->trig_max_uv = trig_max_mv * 1000;
+	joy->trig_min_uv = TRIG_MIN_UV;
+	/* Set DT max as default for both triggers (calibration overwrites) */
+	for (i = 0; i < NUM_TRIG_CHANS; i++)
+		joy->trig_max_uv[i] = trig_max_mv * 1000;
 
 	/* --- Acquire IIO channels --- */
 
@@ -628,6 +748,10 @@ static int rg56pro_probe(struct platform_device *pdev)
 			return ret;
 		}
 	}
+
+	/* --- Auto-calibrate sticks and triggers from ADC at rest --- */
+
+	rg56pro_calibrate(joy);
 
 	/* --- Parse ADC button child nodes --- */
 
@@ -724,10 +848,12 @@ static int rg56pro_probe(struct platform_device *pdev)
 				     AXIS_MIN, AXIS_MAX, 16, 128);
 	}
 
-	/* Register trigger axes */
+	/* Register trigger axes (calibration makes large fuzz/flat unnecessary) */
 	for (i = 0; i < NUM_TRIG_CHANS; i++) {
 		input_set_abs_params(input, trig_abs_codes[i],
-				     TRIG_MIN, TRIG_MAX, 16, 128);
+				     TRIG_MIN, TRIG_MAX,
+				     TRIG_FUZZ_CALIBRATED,
+				     TRIG_FLAT_CALIBRATED);
 	}
 
 	/* Register GPIO buttons */
