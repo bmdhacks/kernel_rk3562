@@ -766,6 +766,11 @@ static void rk8xx_device_shutdown(void)
 		reg = RK818_DEVCTRL_REG;
 		bit = DEV_OFF;
 		break;
+	case RK809_ID:
+	case RK817_ID:
+		reg = RK817_SYS_CFG(3);
+		bit = DEV_OFF;
+		break;
 	default:
 		return;
 	}
@@ -1233,6 +1238,7 @@ static int rk808_probe(struct i2c_client *client,
 		nr_cells = ARRAY_SIZE(rk817s);
 		on_source = RK817_ON_SOURCE_REG;
 		off_source = RK817_OFF_SOURCE_REG;
+		device_shutdown_fn = rk8xx_device_shutdown;
 		rk808->pm_pwroff_prep_fn = rk817_shutdown_prepare;
 		of_property_prepare_fn = rk817_of_property_prepare;
 		pinctrl_init = rk817_pinctrl_init;

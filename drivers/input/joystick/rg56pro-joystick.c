@@ -9,9 +9,12 @@
  * Features:
  * - IRQ-driven GPIO buttons with configurable debounce
  * - Force feedback (rumble) via GPIO-connected motors
- * - Right stick axis inversion (DT properties)
  * - Left/right stick X/Y axis swap (DT properties)
  * - Axis-to-dpad mode via sysfs
+ *
+ * Note: The stock zed_joystick driver reads l_x_swap, l_y_swap, r_x_swap,
+ * and r_y_swap DT properties but never uses them for axis inversion.
+ * We match that behavior by ignoring these properties entirely.
  *
  * Compatible with the "play_joystick" device tree node shipped in the
  * stock RK3562 firmware.
@@ -61,6 +64,9 @@
 
 /* Trigger: consistent fully-pressed floor (in microvolts) */
 #define TRIG_MIN_UV		11000	/* 11mV observed */
+/* Trigger: dead zone near rest — suppress noise below this output value.
+ * L2 noise peaks at ~536, R2 at ~77 on 0-32767 scale. 800 gives margin. */
+#define TRIG_DZ_OUTPUT		800
 /* Trigger: calibrated fuzz/flat (much smaller than pre-calibration values) */
 #define TRIG_FLAT_CALIBRATED	512
 #define TRIG_FUZZ_CALIBRATED	64
@@ -105,12 +111,6 @@ struct rg56pro_joystick {
 	/* Trigger calibration (millivolts from DTS, converted to microvolts) */
 	int trig_min_uv;
 	int trig_max_uv[NUM_TRIG_CHANS];  /* per-trigger resting voltage */
-
-	/* Axis inversion flags */
-	bool lx_swap;
-	bool ly_swap;
-	bool rx_swap;
-	bool ry_swap;
 
 	/* Axis X/Y swap flags */
 	bool l_xy_swap;
@@ -175,8 +175,7 @@ static unsigned int rg56pro_stick_code(struct rg56pro_joystick *joy, int i)
  * Map a raw microvolt ADC reading to the [-32767, 32767] axis range.
  * Values within the per-axis dead zone map to 0.
  */
-static int rg56pro_map_stick(struct rg56pro_joystick *joy, int uv,
-			     int axis, bool swap)
+static int rg56pro_map_stick(struct rg56pro_joystick *joy, int uv, int axis)
 {
 	int dz_lo = joy->axis_dz_lo_uv[axis];
 	int dz_hi = joy->axis_dz_hi_uv[axis];
@@ -193,17 +192,16 @@ static int rg56pro_map_stick(struct rg56pro_joystick *joy, int uv,
 		return 0;
 
 	if (uv < dz_lo) {
-		/* Below dead zone: map [min, dz_lo] → [-32767, 0] */
-		val = (int)((long long)(uv - dz_lo) * 32767 /
-			    (dz_lo - joy->axis_min_uv));
+		/* Below dead zone: map [min, dz_lo] → [0, -32767]
+		 * (low voltage = left/up on this hardware) */
+		val = -(int)((long long)(dz_lo - uv) * 32767 /
+			     (dz_lo - joy->axis_min_uv));
 	} else {
-		/* Above dead zone: map [dz_hi, max] → [0, 32767] */
+		/* Above dead zone: map [dz_hi, max] → [+32767, 0]
+		 * (high voltage = right/down on this hardware) */
 		val = (int)((long long)(uv - dz_hi) * 32767 /
 			    (joy->axis_max_uv - dz_hi));
 	}
-
-	if (swap)
-		val = -val;
 
 	if (val < AXIS_MIN)
 		val = AXIS_MIN;
@@ -230,6 +228,10 @@ static int rg56pro_map_trigger(struct rg56pro_joystick *joy, int uv, int trig)
 	/* Triggers are pull-up: high voltage = released, low = pressed */
 	val = (int)((long long)(trig_max - uv) * 32767 /
 		    (trig_max - joy->trig_min_uv));
+
+	/* Suppress noise near rest position */
+	if (val < TRIG_DZ_OUTPUT)
+		val = 0;
 
 	if (val < TRIG_MIN)
 		val = TRIG_MIN;
@@ -364,12 +366,14 @@ static void rg56pro_poll(struct input_dev *input)
 	struct rg56pro_joystick *joy = input_get_drvdata(input);
 	int stick_vals[NUM_STICK_CHANS];
 	int i, ret, raw;
-	bool swap;
 
-	/* Step 1: Read all stick channels and apply inversion */
+	/* Step 1: Read all stick channels */
 	for (i = 0; i < NUM_STICK_CHANS; i++) {
 		ret = iio_read_channel_processed(joy->stick_chans[i], &raw);
 		if (ret < 0) {
+			dev_warn_once(joy->dev,
+				      "Stick %d (%s): IIO read failed: %d\n",
+				      i, stick_chan_names[i], ret);
 			stick_vals[i] = 0;
 			continue;
 		}
@@ -377,17 +381,7 @@ static void rg56pro_poll(struct input_dev *input)
 		/* iio_read_channel_processed returns millivolts; convert to uV */
 		raw *= 1000;
 
-		swap = false;
-		if (i == 0)
-			swap = joy->lx_swap;
-		else if (i == 1)
-			swap = joy->ly_swap;
-		else if (i == 2)
-			swap = joy->rx_swap;
-		else if (i == 3)
-			swap = joy->ry_swap;
-
-		stick_vals[i] = rg56pro_map_stick(joy, raw, i, swap);
+		stick_vals[i] = rg56pro_map_stick(joy, raw, i);
 	}
 
 	/* Step 2: Read and report triggers */
@@ -416,11 +410,26 @@ static void rg56pro_poll(struct input_dev *input)
 
 	/* Step 5/6: Report stick axes or dpad */
 	if (joy->axis_to_dpad) {
-		/* Left stick → dpad keys */
-		bool up    = stick_vals[1] < -DPAD_THRESHOLD;
-		bool down  = stick_vals[1] >  DPAD_THRESHOLD;
-		bool left  = stick_vals[0] < -DPAD_THRESHOLD;
-		bool right = stick_vals[0] >  DPAD_THRESHOLD;
+		/* Determine logical X/Y values for dpad thresholds.
+		 * rg56pro_map_stick() already returns correct polarity:
+		 * negative = left/up, positive = right/down. */
+		int log_x = 0, log_y = 0;
+		bool up, down, left, right;
+
+		for (i = 0; i < 2; i++) {
+			int val = stick_vals[i];
+			unsigned int code = rg56pro_stick_code(joy, i);
+
+			if (code == ABS_X)
+				log_x = val;
+			else
+				log_y = val;
+		}
+
+		up    = log_y < -DPAD_THRESHOLD;
+		down  = log_y >  DPAD_THRESHOLD;
+		left  = log_x < -DPAD_THRESHOLD;
+		right = log_x >  DPAD_THRESHOLD;
 
 		if (up != joy->last_dpad_up) {
 			input_report_key(input, BTN_DPAD_UP, up);
@@ -448,9 +457,11 @@ static void rg56pro_poll(struct input_dev *input)
 		input_report_abs(input, rg56pro_stick_code(joy, 3), stick_vals[3]);
 	} else {
 		/* Normal mode: report all 4 axes with XY swap */
-		for (i = 0; i < NUM_STICK_CHANS; i++)
-			input_report_abs(input, rg56pro_stick_code(joy, i),
-					 stick_vals[i]);
+		for (i = 0; i < NUM_STICK_CHANS; i++) {
+			int val = stick_vals[i];
+			unsigned int code = rg56pro_stick_code(joy, i);
+			input_report_abs(input, code, val);
+		}
 	}
 
 	/* Step 7: Single sync */
@@ -500,19 +511,25 @@ static void rg56pro_calibrate(struct rg56pro_joystick *joy)
 
 	/* Calibrate stick dead zones */
 	for (i = 0; i < NUM_STICK_CHANS; i++) {
+		static const char * const axis_labels[] = {
+			"LX", "LY", "RX", "RY"
+		};
+
 		center_mv = rg56pro_read_avg(joy->stick_chans[i],
 					     CALIBRATION_SAMPLES);
 		if (center_mv < 0) {
-			dev_warn(dev, "Stick %d: calibration read failed (%d), using DT defaults\n",
-				 i, center_mv);
+			dev_warn(dev, "Stick %d (%s/%s): calibration read failed (%d), using DT defaults\n",
+				 i, axis_labels[i], stick_chan_names[i],
+				 center_mv);
 			continue;
 		}
 
 		/* Validate: center should be well within the physical range */
 		if (center_mv * 1000 < joy->axis_min_uv + 200000 ||
 		    center_mv * 1000 > joy->axis_max_uv - 200000) {
-			dev_warn(dev, "Stick %d: center %d mV outside safe range [%d, %d] mV, using DT defaults\n",
-				 i, center_mv,
+			dev_warn(dev, "Stick %d (%s/%s): center %d mV outside safe range [%d, %d] mV, using DT defaults\n",
+				 i, axis_labels[i], stick_chan_names[i],
+				 center_mv,
 				 (joy->axis_min_uv + 200000) / 1000,
 				 (joy->axis_max_uv - 200000) / 1000);
 			continue;
@@ -521,8 +538,9 @@ static void rg56pro_calibrate(struct rg56pro_joystick *joy)
 		joy->axis_dz_lo_uv[i] = center_mv * 1000 - STICK_DZ_MARGIN_UV;
 		joy->axis_dz_hi_uv[i] = center_mv * 1000 + STICK_DZ_MARGIN_UV;
 
-		dev_info(dev, "Stick %d: center %d mV, dead zone [%d, %d] mV\n",
-			 i, center_mv,
+		dev_info(dev, "Stick %d (%s/%s): center %d mV, dead zone [%d, %d] mV\n",
+			 i, axis_labels[i], stick_chan_names[i],
+			 center_mv,
 			 joy->axis_dz_lo_uv[i] / 1000,
 			 joy->axis_dz_hi_uv[i] / 1000);
 	}
@@ -667,12 +685,6 @@ static int rg56pro_probe(struct platform_device *pdev)
 	 * hardcoded 10ms instead of using it. 5ms is correct for silicone-
 	 * dampened microswitches. */
 	joy->debounce_ms = debounce_ms;
-
-	/* Axis inversion */
-	joy->lx_swap = of_property_read_bool(dev->of_node, "l_x_swap");
-	joy->ly_swap = of_property_read_bool(dev->of_node, "l_y_swap");
-	joy->rx_swap = of_property_read_bool(dev->of_node, "r_x_swap");
-	joy->ry_swap = of_property_read_bool(dev->of_node, "r_y_swap");
 
 	/* Axis X/Y swap */
 	joy->l_xy_swap = of_property_read_bool(dev->of_node, "l_xy_swap");
