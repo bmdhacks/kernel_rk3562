@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * RG56 Pro built-in gamepad driver
+ * RK3562 handheld gamepad driver
  *
- * Input driver for the RG56 Pro handheld's integrated gamepad.
- * Reads analog sticks and triggers via IIO (SARADC), ADC-threshold buttons
- * via IIO, and GPIO-connected buttons via IRQ with debounce.
+ * Generic input driver for RK3562-based handheld gamepads (RG56 Pro,
+ * RG43H Pro, etc.).  Reads analog sticks and triggers via IIO (SARADC),
+ * ADC-threshold buttons via IIO, and GPIO-connected buttons via IRQ
+ * with debounce.
  *
  * Features:
  * - IRQ-driven GPIO buttons with configurable debounce
+ * - Dynamic GPIO button count (read from DT key-gpios-map)
  * - Force feedback (rumble) via GPIO-connected motors
  * - Left/right stick X/Y axis swap (DT properties)
+ * - Left stick polarity inversion (DT property "left-stick-invert")
  * - Axis-to-dpad mode via sysfs
  *
  * Note: The stock zed_joystick driver reads l_x_swap, l_y_swap, r_x_swap,
@@ -31,8 +34,9 @@
 #include <linux/workqueue.h>
 #include <linux/pm.h>
 #include <linux/delay.h>
+#include <linux/slab.h>
 
-#define DRIVER_NAME	"rg56pro-joystick"
+#define DRIVER_NAME	"rk3562-joystick"
 
 /* Number of stick axes (LX, LY, RX, RY) */
 #define NUM_STICK_CHANS	4
@@ -40,8 +44,6 @@
 #define NUM_TRIG_CHANS	2
 /* Number of ADC-threshold buttons (dpad L/R/D, B, X, Y) */
 #define NUM_ADC_BTNS	6
-/* Number of GPIO buttons */
-#define NUM_GPIO_BTNS	10
 
 /* Reported axis range to userspace */
 #define AXIS_MIN	-32767
@@ -49,22 +51,22 @@
 #define TRIG_MIN	0
 #define TRIG_MAX	32767
 
-/* Axis-to-dpad threshold: ~55% of 32767 ≈ 18000 */
+/* Axis-to-dpad threshold: ~55% of 32767 = 18000 */
 #define DPAD_THRESHOLD	18000
 
-/* Default debounce interval in ms — silicone-dampened microswitches settle in 1-3ms */
+/* Default debounce interval in ms -- silicone-dampened microswitches settle in 1-3ms */
 #define DEFAULT_DEBOUNCE_MS	5
 
 /* Auto-calibration parameters */
 #define CALIBRATION_SAMPLES	16	/* readings to average at probe */
 #define CALIBRATION_DELAY_US	1000	/* 1ms between samples */
 
-/* Stick: dead zone is center ± this margin (in microvolts) */
-#define STICK_DZ_MARGIN_UV	110000	/* 110mV — matches DT's ~110mV half-width */
+/* Stick: dead zone is center +/- this margin (in microvolts) */
+#define STICK_DZ_MARGIN_UV	110000	/* 110mV -- matches DT's ~110mV half-width */
 
 /* Trigger: consistent fully-pressed floor (in microvolts) */
 #define TRIG_MIN_UV		11000	/* 11mV observed */
-/* Trigger: dead zone near rest — suppress noise below this output value.
+/* Trigger: dead zone near rest -- suppress noise below this output value.
  * L2 noise peaks at ~536, R2 at ~77 on 0-32767 scale. 800 gives margin. */
 #define TRIG_DZ_OUTPUT		800
 /* Trigger: calibrated fuzz/flat (much smaller than pre-calibration values) */
@@ -75,17 +77,17 @@
 #define KEY_HOME_DTS	102
 #define KEY_FN_DTS	464
 
-struct rg56pro_joystick;
+struct rk3562_joystick;
 
-struct rg56pro_gpio_btn {
+struct rk3562_gpio_btn {
 	struct gpio_desc *gpiod;
 	unsigned int code;
 	int irq;
 	struct delayed_work work;
-	struct rg56pro_joystick *joy;
+	struct rk3562_joystick *joy;
 };
 
-struct rg56pro_joystick {
+struct rk3562_joystick {
 	struct device *dev;
 	struct input_dev *input;
 
@@ -94,8 +96,9 @@ struct rg56pro_joystick {
 	struct iio_channel *trig_chans[NUM_TRIG_CHANS];
 	struct iio_channel *adc_btn_chans[NUM_ADC_BTNS];
 
-	/* GPIO buttons (IRQ-driven) */
-	struct rg56pro_gpio_btn gpio_btns[NUM_GPIO_BTNS];
+	/* GPIO buttons (IRQ-driven, dynamically sized) */
+	struct rk3562_gpio_btn *gpio_btns;
+	int num_gpio_btns;
 	unsigned int debounce_ms;
 
 	/* ADC button codes and thresholds */
@@ -115,6 +118,10 @@ struct rg56pro_joystick {
 	/* Axis X/Y swap flags */
 	bool l_xy_swap;
 	bool r_xy_swap;
+
+	/* Left stick polarity inversion (for devices where the left stick
+	 * module is physically rotated 180 degrees, e.g. RG56 Pro) */
+	bool left_stick_invert;
 
 	/* Rumble motors (optional) */
 	struct gpio_desc *moto_gpio;
@@ -155,7 +162,7 @@ static const unsigned int trig_abs_codes[NUM_TRIG_CHANS] = {
 /*
  * Return the ABS code for stick channel @i, accounting for XY swap.
  */
-static unsigned int rg56pro_stick_code(struct rg56pro_joystick *joy, int i)
+static unsigned int rk3562_stick_code(struct rk3562_joystick *joy, int i)
 {
 	switch (i) {
 	case 0: /* LX */
@@ -175,7 +182,7 @@ static unsigned int rg56pro_stick_code(struct rg56pro_joystick *joy, int i)
  * Map a raw microvolt ADC reading to the [-32767, 32767] axis range.
  * Values within the per-axis dead zone map to 0.
  */
-static int rg56pro_map_stick(struct rg56pro_joystick *joy, int uv, int axis)
+static int rk3562_map_stick(struct rk3562_joystick *joy, int uv, int axis)
 {
 	int dz_lo = joy->axis_dz_lo_uv[axis];
 	int dz_hi = joy->axis_dz_hi_uv[axis];
@@ -187,19 +194,20 @@ static int rg56pro_map_stick(struct rg56pro_joystick *joy, int uv, int axis)
 	if (uv > joy->axis_max_uv)
 		uv = joy->axis_max_uv;
 
-	/* Dead zone → 0 */
+	/* Dead zone -> 0 */
 	if (uv >= dz_lo && uv <= dz_hi)
 		return 0;
 
 	if (uv < dz_lo) {
-		/* Below dead zone: map [min, dz_lo] → [+32767, 0]
+		/* Below dead zone: map [min, dz_lo] -> [+32767, 0]
 		 * Right stick: low voltage = right/down (positive).
-		 * Left stick pots are wired with opposite polarity;
-		 * corrected by per-axis negation in the poll function. */
+		 * Left stick pots may be wired with opposite polarity;
+		 * corrected by per-axis negation in the poll function
+		 * when left_stick_invert is set. */
 		val = (int)((long long)(dz_lo - uv) * 32767 /
 			    (dz_lo - joy->axis_min_uv));
 	} else {
-		/* Above dead zone: map [dz_hi, max] → [0, -32767] */
+		/* Above dead zone: map [dz_hi, max] -> [0, -32767] */
 		val = (int)((long long)(dz_hi - uv) * 32767 /
 			    (joy->axis_max_uv - dz_hi));
 	}
@@ -216,7 +224,7 @@ static int rg56pro_map_stick(struct rg56pro_joystick *joy, int uv, int axis)
  * Map a raw microvolt reading to the [0, 32767] trigger range.
  * Uses per-trigger resting voltage as the max.
  */
-static int rg56pro_map_trigger(struct rg56pro_joystick *joy, int uv, int trig)
+static int rk3562_map_trigger(struct rk3562_joystick *joy, int uv, int trig)
 {
 	int trig_max = joy->trig_max_uv[trig];
 	int val;
@@ -244,11 +252,11 @@ static int rg56pro_map_trigger(struct rg56pro_joystick *joy, int uv, int trig)
 
 /* --- IRQ-driven GPIO buttons --- */
 
-static void rg56pro_gpio_work_func(struct work_struct *work)
+static void rk3562_gpio_work_func(struct work_struct *work)
 {
-	struct rg56pro_gpio_btn *btn =
-		container_of(work, struct rg56pro_gpio_btn, work.work);
-	struct rg56pro_joystick *joy = btn->joy;
+	struct rk3562_gpio_btn *btn =
+		container_of(work, struct rk3562_gpio_btn, work.work);
+	struct rk3562_joystick *joy = btn->joy;
 	int val;
 
 	val = gpiod_get_value_cansleep(btn->gpiod);
@@ -263,10 +271,10 @@ static void rg56pro_gpio_work_func(struct work_struct *work)
 	input_sync(joy->input);
 }
 
-static irqreturn_t rg56pro_gpio_isr(int irq, void *data)
+static irqreturn_t rk3562_gpio_isr(int irq, void *data)
 {
-	struct rg56pro_gpio_btn *btn = data;
-	struct rg56pro_joystick *joy = btn->joy;
+	struct rk3562_gpio_btn *btn = data;
+	struct rk3562_joystick *joy = btn->joy;
 
 	mod_delayed_work(system_wq, &btn->work,
 			 msecs_to_jiffies(joy->debounce_ms));
@@ -274,21 +282,21 @@ static irqreturn_t rg56pro_gpio_isr(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static void rg56pro_cancel_gpio_work(void *data)
+static void rk3562_cancel_gpio_work(void *data)
 {
-	struct rg56pro_joystick *joy = data;
+	struct rk3562_joystick *joy = data;
 	int i;
 
-	for (i = 0; i < NUM_GPIO_BTNS; i++)
+	for (i = 0; i < joy->num_gpio_btns; i++)
 		cancel_delayed_work_sync(&joy->gpio_btns[i].work);
 }
 
 /* --- Force feedback (rumble) --- */
 
-static int rg56pro_play_effect(struct input_dev *dev, void *data,
-			       struct ff_effect *effect)
+static int rk3562_play_effect(struct input_dev *dev, void *data,
+			      struct ff_effect *effect)
 {
-	struct rg56pro_joystick *joy = input_get_drvdata(dev);
+	struct rk3562_joystick *joy = input_get_drvdata(dev);
 	bool on;
 
 	on = effect->u.rumble.strong_magnitude ||
@@ -309,7 +317,7 @@ static int rg56pro_play_effect(struct input_dev *dev, void *data,
 static ssize_t axis_to_dpad_show(struct device *dev,
 				 struct device_attribute *attr, char *buf)
 {
-	struct rg56pro_joystick *joy = platform_get_drvdata(to_platform_device(dev));
+	struct rk3562_joystick *joy = platform_get_drvdata(to_platform_device(dev));
 
 	return sysfs_emit(buf, "%d\n", joy->axis_to_dpad);
 }
@@ -318,7 +326,7 @@ static ssize_t axis_to_dpad_store(struct device *dev,
 				  struct device_attribute *attr,
 				  const char *buf, size_t count)
 {
-	struct rg56pro_joystick *joy = platform_get_drvdata(to_platform_device(dev));
+	struct rk3562_joystick *joy = platform_get_drvdata(to_platform_device(dev));
 	bool val;
 	int ret;
 
@@ -354,17 +362,17 @@ static ssize_t axis_to_dpad_store(struct device *dev,
 
 static DEVICE_ATTR_RW(axis_to_dpad);
 
-static struct attribute *rg56pro_attrs[] = {
+static struct attribute *rk3562_attrs[] = {
 	&dev_attr_axis_to_dpad.attr,
 	NULL,
 };
-ATTRIBUTE_GROUPS(rg56pro);
+ATTRIBUTE_GROUPS(rk3562);
 
 /* --- Poll function --- */
 
-static void rg56pro_poll(struct input_dev *input)
+static void rk3562_poll(struct input_dev *input)
 {
-	struct rg56pro_joystick *joy = input_get_drvdata(input);
+	struct rk3562_joystick *joy = input_get_drvdata(input);
 	int stick_vals[NUM_STICK_CHANS];
 	int i, ret, raw;
 
@@ -382,7 +390,7 @@ static void rg56pro_poll(struct input_dev *input)
 		/* iio_read_channel_processed returns millivolts; convert to uV */
 		raw *= 1000;
 
-		stick_vals[i] = rg56pro_map_stick(joy, raw, i);
+		stick_vals[i] = rk3562_map_stick(joy, raw, i);
 	}
 
 	/* Step 2: Read and report triggers */
@@ -393,7 +401,7 @@ static void rg56pro_poll(struct input_dev *input)
 
 		raw *= 1000;
 		input_report_abs(input, trig_abs_codes[i],
-				 rg56pro_map_trigger(joy, raw, i));
+				 rk3562_map_trigger(joy, raw, i));
 	}
 
 	/* Step 3: Read and report ADC-threshold buttons */
@@ -402,7 +410,7 @@ static void rg56pro_poll(struct input_dev *input)
 		if (ret < 0)
 			continue;
 
-		raw *= 1000; /* mV → uV */
+		raw *= 1000; /* mV -> uV */
 		input_report_key(input, joy->adc_btn_codes[i],
 				 raw < joy->adc_btn_thresh[i] ? 1 : 0);
 	}
@@ -411,17 +419,15 @@ static void rg56pro_poll(struct input_dev *input)
 
 	/* Step 5/6: Report stick axes or dpad */
 	if (joy->axis_to_dpad) {
-		/* Determine logical X/Y values for dpad thresholds.
-		 * Left stick pots have inverted polarity; negate
-		 * both axes before threshold comparison. */
 		int log_x = 0, log_y = 0;
 		bool up, down, left, right;
 
 		for (i = 0; i < 2; i++) {
 			int val = stick_vals[i];
-			unsigned int code = rg56pro_stick_code(joy, i);
+			unsigned int code = rk3562_stick_code(joy, i);
 
-			if (code == ABS_X || code == ABS_Y)
+			if (joy->left_stick_invert &&
+			    (code == ABS_X || code == ABS_Y))
 				val = -val;
 
 			if (code == ABS_X)
@@ -453,23 +459,25 @@ static void rg56pro_poll(struct input_dev *input)
 		}
 
 		/* Still report left stick as zeroed ABS so apps don't see stale values */
-		input_report_abs(input, rg56pro_stick_code(joy, 0), 0);
-		input_report_abs(input, rg56pro_stick_code(joy, 1), 0);
+		input_report_abs(input, rk3562_stick_code(joy, 0), 0);
+		input_report_abs(input, rk3562_stick_code(joy, 1), 0);
 
 		/* Right stick still reports normally */
-		input_report_abs(input, rg56pro_stick_code(joy, 2), stick_vals[2]);
-		input_report_abs(input, rg56pro_stick_code(joy, 3), stick_vals[3]);
+		input_report_abs(input, rk3562_stick_code(joy, 2), stick_vals[2]);
+		input_report_abs(input, rk3562_stick_code(joy, 3), stick_vals[3]);
 	} else {
 		/* Normal mode: report all 4 axes with XY swap */
 		for (i = 0; i < NUM_STICK_CHANS; i++) {
 			int val = stick_vals[i];
-			unsigned int code = rg56pro_stick_code(joy, i);
+			unsigned int code = rk3562_stick_code(joy, i);
 
-			/* Left stick module is rotated 180° (ribbon cable
-			 * faces inward), so its pots have opposite voltage
-			 * polarity from the right stick.  Negate both
-			 * left axes to match Linux ABS convention. */
-			if (code == ABS_X || code == ABS_Y)
+			/* If left stick inversion is enabled, negate both
+			 * left axes.  This corrects for devices where the
+			 * left stick module is physically rotated 180
+			 * degrees (ribbon cable faces inward), giving
+			 * opposite voltage polarity from the right stick. */
+			if (joy->left_stick_invert &&
+			    (code == ABS_X || code == ABS_Y))
 				val = -val;
 
 			input_report_abs(input, code, val);
@@ -486,7 +494,7 @@ static void rg56pro_poll(struct input_dev *input)
  * Read an IIO channel @samples times and return the average in millivolts.
  * Discards the first reading as a warm-up. Returns negative on error.
  */
-static int rg56pro_read_avg(struct iio_channel *chan, int samples)
+static int rk3562_read_avg(struct iio_channel *chan, int samples)
 {
 	int i, ret, val;
 	long sum = 0;
@@ -516,7 +524,7 @@ static int rg56pro_read_avg(struct iio_channel *chan, int samples)
  * at rest (nothing pressed). Must be called after IIO channels are acquired
  * and before input device registration.
  */
-static void rg56pro_calibrate(struct rg56pro_joystick *joy)
+static void rk3562_calibrate(struct rk3562_joystick *joy)
 {
 	struct device *dev = joy->dev;
 	int i, center_mv, rest_mv;
@@ -527,8 +535,8 @@ static void rg56pro_calibrate(struct rg56pro_joystick *joy)
 			"LX", "LY", "RX", "RY"
 		};
 
-		center_mv = rg56pro_read_avg(joy->stick_chans[i],
-					     CALIBRATION_SAMPLES);
+		center_mv = rk3562_read_avg(joy->stick_chans[i],
+					    CALIBRATION_SAMPLES);
 		if (center_mv < 0) {
 			dev_warn(dev, "Stick %d (%s/%s): calibration read failed (%d), using DT defaults\n",
 				 i, axis_labels[i], stick_chan_names[i],
@@ -559,8 +567,8 @@ static void rg56pro_calibrate(struct rg56pro_joystick *joy)
 
 	/* Calibrate trigger resting voltages */
 	for (i = 0; i < NUM_TRIG_CHANS; i++) {
-		rest_mv = rg56pro_read_avg(joy->trig_chans[i],
-					   CALIBRATION_SAMPLES);
+		rest_mv = rk3562_read_avg(joy->trig_chans[i],
+					  CALIBRATION_SAMPLES);
 		if (rest_mv < 0) {
 			dev_warn(dev, "Trigger %d: calibration read failed (%d), using DT default\n",
 				 i, rest_mv);
@@ -582,8 +590,8 @@ static void rg56pro_calibrate(struct rg56pro_joystick *joy)
 
 /* --- DT parsing --- */
 
-static int rg56pro_parse_adc_buttons(struct rg56pro_joystick *joy,
-				     struct device *dev)
+static int rk3562_parse_adc_buttons(struct rk3562_joystick *joy,
+				    struct device *dev)
 {
 	struct device_node *node = dev->of_node;
 	struct device_node *child;
@@ -625,13 +633,13 @@ static int rg56pro_parse_adc_buttons(struct rg56pro_joystick *joy,
  * Remap DTS key codes that fall outside the BTN_* range (and would be
  * invisible to joydev) into BTN_TL2/BTN_TR2.
  */
-static unsigned int rg56pro_remap_code(unsigned int dts_code)
+static unsigned int rk3562_remap_code(unsigned int dts_code)
 {
 	switch (dts_code) {
 	case KEY_HOME_DTS:
-		return BTN_TL2;   /* 0x138 — Home → distinct function button */
+		return BTN_TL2;   /* 0x138 -- Home -> distinct function button */
 	case KEY_FN_DTS:
-		return BTN_MODE;  /* 0x13c — FN/Menu → hotkey enable in RetroArch */
+		return BTN_MODE;  /* 0x13c -- FN/Menu -> hotkey enable in RetroArch */
 	default:
 		return dts_code;
 	}
@@ -639,9 +647,9 @@ static unsigned int rg56pro_remap_code(unsigned int dts_code)
 
 /* --- PM ops --- */
 
-static int rg56pro_suspend(struct device *dev)
+static int rk3562_suspend(struct device *dev)
 {
-	struct rg56pro_joystick *joy = dev_get_drvdata(dev);
+	struct rk3562_joystick *joy = dev_get_drvdata(dev);
 
 	/* Turn off motors on suspend */
 	if (joy->moto_gpio)
@@ -652,9 +660,9 @@ static int rg56pro_suspend(struct device *dev)
 	return 0;
 }
 
-static int rg56pro_resume(struct device *dev)
+static int rk3562_resume(struct device *dev)
 {
-	struct rg56pro_joystick *joy = dev_get_drvdata(dev);
+	struct rk3562_joystick *joy = dev_get_drvdata(dev);
 
 	/* Restore rumble state */
 	if (joy->rumble_on) {
@@ -667,16 +675,16 @@ static int rg56pro_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(rg56pro_pm_ops, rg56pro_suspend, rg56pro_resume);
+static SIMPLE_DEV_PM_OPS(rk3562_pm_ops, rk3562_suspend, rk3562_resume);
 
 /* --- Probe --- */
 
-static int rg56pro_probe(struct platform_device *pdev)
+static int rk3562_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct rg56pro_joystick *joy;
+	struct rk3562_joystick *joy;
 	struct input_dev *input;
-	u32 gpio_codes[NUM_GPIO_BTNS];
+	u32 *gpio_codes;
 	u32 poll_interval = 8;
 	u32 debounce_ms = DEFAULT_DEBOUNCE_MS;
 	int axis_min_mv, axis_max_mv, dz_lo_mv, dz_hi_mv;
@@ -693,7 +701,7 @@ static int rg56pro_probe(struct platform_device *pdev)
 	/* --- Parse DT properties --- */
 
 	of_property_read_u32(dev->of_node, "poll-interval", &poll_interval);
-	/* Ignore DT debounce-interval (100ms) — manufacturer's own driver
+	/* Ignore DT debounce-interval (100ms) -- manufacturer's own driver
 	 * hardcoded 10ms instead of using it. 5ms is correct for silicone-
 	 * dampened microswitches. */
 	joy->debounce_ms = debounce_ms;
@@ -702,7 +710,13 @@ static int rg56pro_probe(struct platform_device *pdev)
 	joy->l_xy_swap = of_property_read_bool(dev->of_node, "l_xy_swap");
 	joy->r_xy_swap = of_property_read_bool(dev->of_node, "r_xy_swap");
 
-	/* Stick calibration (millivolts → microvolts) */
+	/* Left stick polarity inversion.  Set this in DT for devices where
+	 * the left stick module is physically rotated 180 degrees, giving
+	 * opposite voltage polarity from the right stick. */
+	joy->left_stick_invert = of_property_read_bool(dev->of_node,
+						       "left-stick-invert");
+
+	/* Stick calibration (millivolts -> microvolts) */
 	if (of_property_read_u32(dev->of_node, "axis-min-value-mv",
 				 &axis_min_mv))
 		axis_min_mv = 250;
@@ -775,36 +789,45 @@ static int rg56pro_probe(struct platform_device *pdev)
 
 	/* --- Auto-calibrate sticks and triggers from ADC at rest --- */
 
-	rg56pro_calibrate(joy);
+	rk3562_calibrate(joy);
 
 	/* --- Parse ADC button child nodes --- */
 
-	ret = rg56pro_parse_adc_buttons(joy, dev);
+	ret = rk3562_parse_adc_buttons(joy, dev);
 	if (ret)
 		return ret;
 
 	/* --- Acquire GPIO buttons (IRQ-driven) --- */
 
 	count = of_property_count_u32_elems(dev->of_node, "key-gpios-map");
-	if (count != NUM_GPIO_BTNS) {
-		dev_err(dev, "Expected %d GPIO key codes, got %d\n",
-			NUM_GPIO_BTNS, count);
+	if (count <= 0) {
+		dev_err(dev, "Missing or empty key-gpios-map property\n");
 		return -EINVAL;
 	}
 
+	joy->num_gpio_btns = count;
+	joy->gpio_btns = devm_kcalloc(dev, count, sizeof(*joy->gpio_btns),
+				      GFP_KERNEL);
+	if (!joy->gpio_btns)
+		return -ENOMEM;
+
+	gpio_codes = devm_kcalloc(dev, count, sizeof(*gpio_codes), GFP_KERNEL);
+	if (!gpio_codes)
+		return -ENOMEM;
+
 	ret = of_property_read_u32_array(dev->of_node, "key-gpios-map",
-					 gpio_codes, NUM_GPIO_BTNS);
+					 gpio_codes, count);
 	if (ret) {
 		dev_err(dev, "Failed to read key-gpios-map: %d\n", ret);
 		return ret;
 	}
 
-	for (i = 0; i < NUM_GPIO_BTNS; i++) {
-		struct rg56pro_gpio_btn *btn = &joy->gpio_btns[i];
+	for (i = 0; i < count; i++) {
+		struct rk3562_gpio_btn *btn = &joy->gpio_btns[i];
 
 		btn->joy = joy;
-		btn->code = rg56pro_remap_code(gpio_codes[i]);
-		INIT_DELAYED_WORK(&btn->work, rg56pro_gpio_work_func);
+		btn->code = rk3562_remap_code(gpio_codes[i]);
+		INIT_DELAYED_WORK(&btn->work, rk3562_gpio_work_func);
 
 		btn->gpiod = devm_gpiod_get_index(dev, "key", i, GPIOD_IN);
 		if (IS_ERR(btn->gpiod)) {
@@ -823,7 +846,7 @@ static int rg56pro_probe(struct platform_device *pdev)
 		}
 
 		ret = devm_request_any_context_irq(dev, btn->irq,
-						   rg56pro_gpio_isr,
+						   rk3562_gpio_isr,
 						   IRQF_TRIGGER_RISING |
 						   IRQF_TRIGGER_FALLING,
 						   DRIVER_NAME, btn);
@@ -834,7 +857,7 @@ static int rg56pro_probe(struct platform_device *pdev)
 		}
 	}
 
-	ret = devm_add_action_or_reset(dev, rg56pro_cancel_gpio_work, joy);
+	ret = devm_add_action_or_reset(dev, rk3562_cancel_gpio_work, joy);
 	if (ret)
 		return ret;
 
@@ -881,12 +904,19 @@ static int rg56pro_probe(struct platform_device *pdev)
 	}
 
 	/* Register GPIO buttons */
-	for (i = 0; i < NUM_GPIO_BTNS; i++)
+	for (i = 0; i < joy->num_gpio_btns; i++)
 		input_set_capability(input, EV_KEY, joy->gpio_btns[i].code);
 
 	/* Register ADC buttons */
 	for (i = 0; i < NUM_ADC_BTNS; i++)
 		input_set_capability(input, EV_KEY, joy->adc_btn_codes[i]);
+
+	/* Always register BTN_TL2 so joydev assigns the same sequential
+	 * button indices on all RK3562 devices, regardless of whether a
+	 * physical HOME button exists (RG56 Pro has it, RG43H does not).
+	 * input_set_capability is idempotent, so this is safe even if a
+	 * GPIO button already registered BTN_TL2 above. */
+	input_set_capability(input, EV_KEY, BTN_TL2);
 
 	/* Register dpad button capabilities (for axis-to-dpad mode) */
 	input_set_capability(input, EV_KEY, BTN_DPAD_UP);
@@ -898,7 +928,7 @@ static int rg56pro_probe(struct platform_device *pdev)
 	if (joy->moto_gpio || joy->moto_r_gpio) {
 		input_set_capability(input, EV_FF, FF_RUMBLE);
 		ret = input_ff_create_memless(input, NULL,
-					      rg56pro_play_effect);
+					      rk3562_play_effect);
 		if (ret) {
 			dev_err(dev, "Failed to create FF device: %d\n", ret);
 			return ret;
@@ -906,7 +936,7 @@ static int rg56pro_probe(struct platform_device *pdev)
 	}
 
 	/* Setup polling (for analog axes and ADC buttons) */
-	ret = input_setup_polling(input, rg56pro_poll);
+	ret = input_setup_polling(input, rk3562_poll);
 	if (ret) {
 		dev_err(dev, "Failed to setup polling: %d\n", ret);
 		return ret;
@@ -922,30 +952,31 @@ static int rg56pro_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	dev_info(dev, "RG56 Pro joystick registered (poll %u ms, debounce %u ms, rumble %s)\n",
-		 poll_interval, joy->debounce_ms,
-		 (joy->moto_gpio || joy->moto_r_gpio) ? "yes" : "no");
+	dev_info(dev, "RK3562 joystick registered (%d GPIOs, poll %u ms, debounce %u ms, rumble %s, lstick-invert %s)\n",
+		 joy->num_gpio_btns, poll_interval, joy->debounce_ms,
+		 (joy->moto_gpio || joy->moto_r_gpio) ? "yes" : "no",
+		 joy->left_stick_invert ? "yes" : "no");
 
 	return 0;
 }
 
-static const struct of_device_id rg56pro_of_match[] = {
+static const struct of_device_id rk3562_of_match[] = {
 	{ .compatible = "play_joystick" },
 	{ },
 };
-MODULE_DEVICE_TABLE(of, rg56pro_of_match);
+MODULE_DEVICE_TABLE(of, rk3562_of_match);
 
-static struct platform_driver rg56pro_driver = {
-	.probe = rg56pro_probe,
+static struct platform_driver rk3562_driver = {
+	.probe = rk3562_probe,
 	.driver = {
 		.name = DRIVER_NAME,
-		.of_match_table = rg56pro_of_match,
-		.pm = &rg56pro_pm_ops,
-		.dev_groups = rg56pro_groups,
+		.of_match_table = rk3562_of_match,
+		.pm = &rk3562_pm_ops,
+		.dev_groups = rk3562_groups,
 	},
 };
-module_platform_driver(rg56pro_driver);
+module_platform_driver(rk3562_driver);
 
-MODULE_DESCRIPTION("RG56 Pro built-in gamepad driver");
+MODULE_DESCRIPTION("RK3562 handheld gamepad driver");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("dArkOS contributors");
