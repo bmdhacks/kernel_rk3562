@@ -134,6 +134,11 @@ struct rk3562_joystick {
 	bool last_dpad_down;
 	bool last_dpad_left;
 	bool last_dpad_right;
+
+	/* Start/Select <-> HOME/BACK swap */
+	bool swap_start_home;
+	bool swap_available;	/* false if any of the 4 buttons missing */
+	int swap_indices[4];	/* gpio_btns[] indices: START, SELECT, MODE, TL2 */
 };
 
 static const char * const stick_chan_names[NUM_STICK_CHANS] = {
@@ -362,8 +367,52 @@ static ssize_t axis_to_dpad_store(struct device *dev,
 
 static DEVICE_ATTR_RW(axis_to_dpad);
 
+/* --- Start/Select <-> HOME/BACK swap sysfs --- */
+
+static ssize_t swap_start_home_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct rk3562_joystick *joy = platform_get_drvdata(to_platform_device(dev));
+
+	return sysfs_emit(buf, "%d\n", joy->swap_start_home);
+}
+
+static ssize_t swap_start_home_store(struct device *dev,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct rk3562_joystick *joy = platform_get_drvdata(to_platform_device(dev));
+	bool val;
+	int ret;
+
+	ret = kstrtobool(buf, &val);
+	if (ret)
+		return ret;
+
+	if (!joy->swap_available)
+		return -ENODEV;
+
+	if (val != joy->swap_start_home) {
+		/* Swap the .code fields on the 4 GPIO buttons */
+		joy->gpio_btns[joy->swap_indices[0]].code =
+			val ? BTN_MODE : BTN_START;
+		joy->gpio_btns[joy->swap_indices[1]].code =
+			val ? BTN_TL2 : BTN_SELECT;
+		joy->gpio_btns[joy->swap_indices[2]].code =
+			val ? BTN_START : BTN_MODE;
+		joy->gpio_btns[joy->swap_indices[3]].code =
+			val ? BTN_SELECT : BTN_TL2;
+		joy->swap_start_home = val;
+	}
+
+	return count;
+}
+
+static DEVICE_ATTR_RW(swap_start_home);
+
 static struct attribute *rk3562_attrs[] = {
 	&dev_attr_axis_to_dpad.attr,
+	&dev_attr_swap_start_home.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(rk3562);
@@ -631,15 +680,15 @@ static int rk3562_parse_adc_buttons(struct rk3562_joystick *joy,
 
 /*
  * Remap DTS key codes that fall outside the BTN_* range (and would be
- * invisible to joydev) into BTN_TL2/BTN_TR2.
+ * invisible to joydev) into BTN_MODE/BTN_TL2.
  */
 static unsigned int rk3562_remap_code(unsigned int dts_code)
 {
 	switch (dts_code) {
 	case KEY_HOME_DTS:
-		return BTN_TL2;   /* 0x138 -- Home -> distinct function button */
+		return BTN_MODE;  /* 0x13c -- HOME/FN -> Guide button */
 	case KEY_FN_DTS:
-		return BTN_MODE;  /* 0x13c -- FN/Menu -> hotkey enable in RetroArch */
+		return BTN_TL2;   /* 0x138 -- BACK -> function button */
 	default:
 		return dts_code;
 	}
@@ -861,6 +910,38 @@ static int rk3562_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	/* --- Locate swappable buttons for Start/Select <-> HOME/BACK --- */
+	{
+		static const unsigned int swap_codes[4] = {
+			BTN_START, BTN_SELECT, BTN_MODE, BTN_TL2,
+		};
+		int found = 0;
+
+		for (i = 0; i < 4; i++)
+			joy->swap_indices[i] = -1;
+
+		for (i = 0; i < joy->num_gpio_btns; i++) {
+			int j;
+
+			for (j = 0; j < 4; j++) {
+				if (joy->gpio_btns[i].code == swap_codes[j]) {
+					joy->swap_indices[j] = i;
+					found++;
+					break;
+				}
+			}
+		}
+
+		joy->swap_available = (found == 4);
+		if (joy->swap_available)
+			dev_info(dev, "Button swap available (START=%d SELECT=%d MODE=%d TL2=%d)\n",
+				 joy->swap_indices[0], joy->swap_indices[1],
+				 joy->swap_indices[2], joy->swap_indices[3]);
+		else
+			dev_info(dev, "Button swap not available (found %d/4 buttons)\n",
+				 found);
+	}
+
 	/* --- Acquire rumble motor GPIOs (optional) --- */
 
 	joy->moto_gpio = devm_gpiod_get_optional(dev, "moto", GPIOD_OUT_LOW);
@@ -911,12 +992,12 @@ static int rk3562_probe(struct platform_device *pdev)
 	for (i = 0; i < NUM_ADC_BTNS; i++)
 		input_set_capability(input, EV_KEY, joy->adc_btn_codes[i]);
 
-	/* Always register BTN_TL2 so joydev assigns the same sequential
-	 * button indices on all RK3562 devices, regardless of whether a
-	 * physical HOME button exists (RG56 Pro has it, RG43H does not).
-	 * input_set_capability is idempotent, so this is safe even if a
-	 * GPIO button already registered BTN_TL2 above. */
+	/* Always register BTN_TL2 and BTN_MODE so joydev assigns the same
+	 * sequential button indices on all RK3562 devices, regardless of
+	 * whether a physical HOME/FN button exists (RG56 Pro has it,
+	 * RG43H does not).  input_set_capability is idempotent. */
 	input_set_capability(input, EV_KEY, BTN_TL2);
+	input_set_capability(input, EV_KEY, BTN_MODE);
 
 	/* Register dpad button capabilities (for axis-to-dpad mode) */
 	input_set_capability(input, EV_KEY, BTN_DPAD_UP);
