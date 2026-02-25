@@ -393,15 +393,15 @@ static ssize_t swap_start_home_store(struct device *dev,
 		return -ENODEV;
 
 	if (val != joy->swap_start_home) {
-		/* Swap the .code fields on the 4 GPIO buttons */
+		/* Pairwise swap: START↔BACK, SELECT↔HOME/FN */
 		joy->gpio_btns[joy->swap_indices[0]].code =
-			val ? BTN_MODE : BTN_START;
+			val ? BTN_TL2 : BTN_START;     /* START → BACK */
 		joy->gpio_btns[joy->swap_indices[1]].code =
-			val ? BTN_TL2 : BTN_SELECT;
+			val ? BTN_MODE : BTN_SELECT;   /* SELECT → HOME/FN */
 		joy->gpio_btns[joy->swap_indices[2]].code =
-			val ? BTN_START : BTN_MODE;
+			val ? BTN_SELECT : BTN_MODE;   /* HOME/FN → SELECT */
 		joy->gpio_btns[joy->swap_indices[3]].code =
-			val ? BTN_SELECT : BTN_TL2;
+			val ? BTN_START : BTN_TL2;     /* BACK → START */
 		joy->swap_start_home = val;
 	}
 
