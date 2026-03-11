@@ -12,6 +12,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
+#include <linux/extcon-provider.h>
 #include <linux/regulator/consumer.h>
 #include <linux/usb/tcpm.h>
 #include "tcpci.h"
@@ -29,6 +30,7 @@ struct husb311_chip {
 	struct tcpci *tcpci;
 	struct device *dev;
 	struct regulator *vbus;
+	struct extcon_dev *edev;
 	bool vbus_on;
 };
 
@@ -88,6 +90,14 @@ static int husb311_set_vbus(struct tcpci *tcpci, struct tcpci_data *tdata,
 	struct husb311_chip *chip = tdata_to_husb311(tdata);
 	int ret = 0;
 
+	if((charge == 1) && (extcon_get_state(chip->edev, EXTCON_CHG_USB_DCP) == false)) {
+		//extcon_set_state_sync(chip->edev, EXTCON_USB_VBUS_EN, false);
+		extcon_set_state_sync(chip->edev, EXTCON_CHG_USB_DCP, true);
+	} else if((charge == 0) && (extcon_get_state(chip->edev, EXTCON_CHG_USB_DCP) == true)) {
+		extcon_set_state_sync(chip->edev, EXTCON_CHG_USB_DCP, false);
+		//extcon_set_state_sync(chip->edev, EXTCON_USB_VBUS_EN, true);
+	}
+
 	if (chip->vbus_on == on) {
 		dev_dbg(chip->dev, "vbus is already %s", on ? "On" : "Off");
 		goto done;
@@ -145,11 +155,22 @@ static int husb311_check_revision(struct i2c_client *i2c)
 	return 0;
 }
 
+static const unsigned int husb311_extcon_cable[] = {
+	EXTCON_USB,
+	EXTCON_USB_VBUS_EN,
+	EXTCON_CHG_USB_SDP,
+	EXTCON_CHG_USB_CDP,
+	EXTCON_CHG_USB_DCP,
+	EXTCON_NONE,
+};
+
+
 static int husb311_probe(struct i2c_client *client,
 			 const struct i2c_device_id *i2c_id)
 {
 	int ret;
 	struct husb311_chip *chip;
+	struct extcon_dev *edev;
 
 	ret = husb311_check_revision(client);
 	if (ret < 0) {
@@ -176,6 +197,18 @@ static int husb311_probe(struct i2c_client *client,
 		if (ret != -ENODEV)
 			return ret;
 	}
+
+	edev = devm_extcon_dev_allocate(chip->dev,
+						husb311_extcon_cable);
+	if (IS_ERR(edev))
+		return -ENOMEM;
+
+	ret = devm_extcon_dev_register(chip->dev, edev);
+	if (ret) {
+		dev_err(chip->dev, "failed to register extcon device\n");
+		return ret;
+	}
+	chip->edev = edev;
 
 	ret = husb311_sw_reset(chip);
 	if (ret < 0) {
