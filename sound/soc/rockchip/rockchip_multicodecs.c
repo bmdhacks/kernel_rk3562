@@ -391,6 +391,10 @@ static int rk_dailink_init(struct snd_soc_pcm_runtime *rtd)
 		}, {
 			.pin = "Headset Mic",
 			.mask = SND_JACK_MICROPHONE,
+		}, {
+			.pin = "Speaker",
+			.mask = SND_JACK_HEADPHONE,
+			.invert = true,
 		},
 	};
 	struct snd_soc_jack_zone headset_zones[] = {

@@ -1534,6 +1534,18 @@ static void rk817_remove(struct snd_soc_component *component)
 
 }
 
+static const struct snd_soc_dapm_widget rk817_dapm_widgets[] = {
+	SND_SOC_DAPM_AIF_IN("AIF1 Playback", "HiFi Playback", 0,
+			    SND_SOC_NOPM, 0, 0),
+	SND_SOC_DAPM_OUTPUT("HPOL"),
+	SND_SOC_DAPM_OUTPUT("HPOR"),
+};
+
+static const struct snd_soc_dapm_route rk817_dapm_routes[] = {
+	{ "HPOL", NULL, "AIF1 Playback" },
+	{ "HPOR", NULL, "AIF1 Playback" },
+};
+
 static const struct snd_soc_component_driver soc_codec_dev_rk817 = {
 	.probe = rk817_probe,
 	.remove = rk817_remove,
@@ -1542,7 +1554,11 @@ static const struct snd_soc_component_driver soc_codec_dev_rk817 = {
 	.idle_bias_on = 1,
 	.use_pmdown_time = 1,
 	.endianness = 1,
-	.non_legacy_dai_naming = 1
+	.non_legacy_dai_naming = 1,
+	.dapm_widgets = rk817_dapm_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(rk817_dapm_widgets),
+	.dapm_routes = rk817_dapm_routes,
+	.num_dapm_routes = ARRAY_SIZE(rk817_dapm_routes),
 };
 
 static int rk817_codec_parse_dt_property(struct device *dev,
