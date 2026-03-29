@@ -10,3 +10,4 @@ obj-$(CONFIG_RTL8822BS) += rtl8822bs/
 obj-$(CONFIG_CYW_BCMDHD)	+= cywdhd/
 #obj-$(CONFIG_WL_ROCKCHIP)	+= rkwifi/rk_wifi_config.o
 obj-$(CONFIG_INFINEON_DHD)	+= infineon/
+obj-$(CONFIG_RK915)	+= rk915/

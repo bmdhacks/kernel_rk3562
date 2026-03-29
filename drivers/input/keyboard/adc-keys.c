@@ -33,8 +33,10 @@ struct adc_keys_state {
 	const struct adc_keys_button *map;
 };
 
+#ifdef CONFIG_JOYSTICK_SINGLEADCJOY
 extern void rk_send_key_f_key_up(void);
 extern void rk_send_key_f_key_down(void);
+#endif
 
 static void adc_keys_poll(struct input_polled_dev *dev)
 {
@@ -61,16 +63,20 @@ static void adc_keys_poll(struct input_polled_dev *dev)
 		keycode = 0;
 
 	if (st->last_key && st->last_key != keycode) {
+#ifdef CONFIG_JOYSTICK_SINGLEADCJOY
 		if (st->last_key == BTN_MODE)
 			rk_send_key_f_key_down();
 		else
+#endif
 			input_report_key(dev->input, st->last_key, 0);
 	}
 
 	if (keycode) {
+#ifdef CONFIG_JOYSTICK_SINGLEADCJOY
 		if (keycode == BTN_MODE)
 			rk_send_key_f_key_up();
 		else
+#endif
 			input_report_key(dev->input, keycode, 1);
 	}
 
@@ -183,7 +189,9 @@ static int adc_keys_probe(struct platform_device *pdev)
 
 	__set_bit(EV_KEY, input->evbit);
 	for (i = 0; i < st->num_keys; i++)
+#ifdef CONFIG_JOYSTICK_SINGLEADCJOY
 		if (st->map[i].keycode != BTN_MODE)
+#endif
 			__set_bit(st->map[i].keycode, input->keybit);
 
 	if (device_property_read_bool(dev, "autorepeat"))
