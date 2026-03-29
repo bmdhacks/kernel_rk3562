@@ -397,4 +397,9 @@ config JOYSTICK_RK3562
 	  To compile this driver as a module, choose M here: the
 	  module will be called rk3562-joystick.
 
+config JOYSTICK_SINGLEADCJOY
+	tristate "SINGLEADC joypad driver"
+	help
+	  Made for RK3566 devices.
+
 endif

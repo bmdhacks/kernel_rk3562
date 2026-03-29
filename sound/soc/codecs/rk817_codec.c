@@ -26,6 +26,8 @@
 #include <sound/soc.h>
 #include <sound/tlv.h>
 #include "rk817_codec.h"
+#define __MURMUR__
+#define CONFIG_RK817_HEADSET
 
 #ifdef CONFIG_SND_DEBUG
 #define DBG(args...) pr_info(args)
@@ -67,6 +69,46 @@
 #define RK817_DAC_VOL_MIN 3
 #define RK817_DAC_VOL_MAX 255
 
+//static void rk817_dapm_force_sync(struct snd_soc_component *component);
+
+#if defined(CONFIG_RK817_HEADSET)
+struct rk817_codec_priv {
+	struct snd_soc_component *component;
+	struct regmap *regmap;
+	struct rk808 *rk817;
+	struct clk *mclk;
+	struct mutex clk_lock;
+
+	unsigned int stereo_sysclk;
+	unsigned int rate;
+
+	unsigned int spk_volume;
+	unsigned int hp_volume;
+	unsigned int capture_volume;
+	unsigned int clk_playback;
+	unsigned int clk_capture;
+
+	bool mic_in_differential;
+	bool pdmdata_out_enable;
+	bool use_ext_amplifier;
+	bool adc_for_loopback;
+	bool resume_path;
+
+	bool out_l2spk_r2hp;
+	long int playback_path;
+	long int capture_path;
+
+	struct gpio_desc *spk_ctl_gpio;
+	struct gpio_desc *hp_ctl_gpio;
+	
+	bool hp_inserted;
+	
+	int spk_mute_delay;
+	int hp_mute_delay;
+	int chip_ver;
+};
+struct rk817_codec_priv *rk817_g;
+#else
 struct rk817_codec_priv {
 	struct snd_soc_component *component;
 	struct regmap *regmap;
@@ -99,6 +141,7 @@ struct rk817_codec_priv {
 	int hp_mute_delay;
 	int chip_ver;
 };
+#endif
 
 /*
  * DADC L/R volume setting
@@ -806,11 +849,22 @@ static int rk817_playback_path_get(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
+/*static void rk817_dapm_force_sync(struct snd_soc_component *component)
+{
+	struct snd_soc_dapm_context *dapm =
+		snd_soc_component_get_dapm(component);
+
+	snd_soc_dapm_mutex_lock(dapm);
+	snd_soc_dapm_sync(dapm);
+	snd_soc_dapm_mutex_unlock(dapm);
+}*/
+
 static int rk817_playback_path_put(struct snd_kcontrol *kcontrol,
 				   struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
 	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
+	int ret;
 
 	if (rk817->playback_path == ucontrol->value.integer.value[0]) {
 		DBG("%s : playback_path is not changed!\n",
@@ -818,8 +872,12 @@ static int rk817_playback_path_put(struct snd_kcontrol *kcontrol,
 		return 0;
 	}
 
-	return rk817_playback_path_config(component, rk817->playback_path,
-					  ucontrol->value.integer.value[0]);
+	ret = rk817_playback_path_config(component, rk817->playback_path,
+					 ucontrol->value.integer.value[0]);
+	if (!ret) 
+		snd_soc_dapm_sync(snd_soc_component_get_dapm(component));
+
+	return ret;
 }
 
 static int rk817_capture_path_config(struct snd_soc_component *component,
@@ -1174,6 +1232,43 @@ static int rk817_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
+#if defined(CONFIG_RK817_HEADSET)
+/*
+ * Call from rk_headset_irq_hook_adc.c
+ *
+ * Enable micbias for HOOK detection and disable external Amplifier
+ * when jack insertion.
+ */
+
+int rk817_hp_inserted=0;
+#ifdef __MURMUR__
+EXPORT_SYMBOL(rk817_hp_inserted);
+#endif
+int rk817_headset_detect(int jack_insert)
+{
+	struct rk817_codec_priv *rk817;
+	
+	rk817_hp_inserted=jack_insert;
+
+	if (!rk817_g)
+		return -1;
+
+	rk817=rk817_g;
+	
+	rk817_g->hp_inserted = jack_insert;
+
+	/*enable micbias and disable PA*/
+	if (jack_insert) {		
+		rk817_codec_ctl_gpio(rk817, CODEC_SET_SPK, 0);
+	}else{
+		rk817_codec_ctl_gpio(rk817, CODEC_SET_SPK, 1);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(rk817_headset_detect);
+#endif
+
 static int rk817_digital_mute_dac(struct snd_soc_dai *dai, int mute, int stream)
 {
 	struct snd_soc_component *component = dai->component;
@@ -1358,21 +1453,28 @@ static struct snd_soc_dai_driver rk817_dai[] = {
 
 static int rk817_suspend(struct snd_soc_component *component)
 {
-	rk817_codec_power_down(component, RK817_CODEC_ALL);
+	/* Let ASoC/DAPM manage power; avoids resume I2C deadlocks */
+	snd_soc_component_force_bias_level(component, SND_SOC_BIAS_OFF);
+	snd_soc_component_disable_pin(component, "Playback");
+	snd_soc_component_disable_pin(component, "Capture");
+	snd_soc_dapm_disable_pin(&component->dapm, "DAC");
 	return 0;
 }
 
 static int rk817_resume(struct snd_soc_component *component)
 {
-	struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
+	/*struct rk817_codec_priv *rk817 = snd_soc_component_get_drvdata(component);
 
 	if (rk817->resume_path) {
 		if (rk817->capture_path != MIC_OFF)
 			rk817_capture_path_config(component, OFF, rk817->capture_path);
+
 		if (rk817->playback_path != OFF)
 			rk817_playback_path_config(component, OFF, rk817->playback_path);
 	}
 
+	rk817_dapm_force_sync(component);*/
+	snd_soc_component_force_bias_level(component, SND_SOC_BIAS_STANDBY);
 	return 0;
 }
 
@@ -1571,6 +1673,14 @@ static int rk817_platform_probe(struct platform_device *pdev)
 					GFP_KERNEL);
 	if (!rk817_codec_data)
 		return -ENOMEM;
+
+	#if defined(CONFIG_RK817_HEADSET)
+	rk817_g	= rk817_codec_data;
+	if(rk817_g->hp_inserted)
+		rk817_g->hp_inserted = true;
+	else
+		rk817_g->hp_inserted = false;
+	#endif
 
 	platform_set_drvdata(pdev, rk817_codec_data);
 

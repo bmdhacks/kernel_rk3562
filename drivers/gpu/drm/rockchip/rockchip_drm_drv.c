@@ -2023,8 +2023,10 @@ static void rockchip_drm_lastclose(struct drm_device *dev)
 {
 	struct rockchip_drm_private *priv = dev->dev_private;
 
-	if (!priv->logo)
-		drm_fb_helper_restore_fbdev_mode_unlocked(priv->fbdev_helper);
+	if (!priv || !priv->fbdev_helper)
+		return;
+
+	drm_fb_helper_hotplug_event(priv->fbdev_helper);
 }
 
 static struct drm_pending_vblank_event *

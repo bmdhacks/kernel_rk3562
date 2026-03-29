@@ -23,6 +23,27 @@
 #include "drm_crtc_internal.h"
 #include "drm_internal.h"
 
+
+
+static bool drm_connector_is_internal(struct drm_connector *connector)
+{
+	switch (connector->connector_type) {
+	case DRM_MODE_CONNECTOR_DSI:
+	case DRM_MODE_CONNECTOR_LVDS:
+	case DRM_MODE_CONNECTOR_eDP:
+	case DRM_MODE_CONNECTOR_DPI:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool drm_connector_is_hdmi(struct drm_connector *connector)
+{
+	return connector->connector_type == DRM_MODE_CONNECTOR_HDMIA ||
+	       connector->connector_type == DRM_MODE_CONNECTOR_HDMIB;
+}
+
 #define DRM_CLIENT_MAX_CLONED_CONNECTORS	8
 
 struct drm_client_offset {
@@ -823,7 +844,32 @@ int drm_client_modeset_probe(struct drm_client_dev *client, unsigned int width, 
 		total_modes_count += connectors[i]->funcs->fill_modes(connectors[i], width, height);
 	if (!total_modes_count)
 		DRM_DEBUG_KMS("No connectors reported connected with modes\n");
+	
 	drm_client_connectors_enabled(connectors, connector_count, enabled);
+
+	/* Prefer HDMI over internal panel if connected */
+	{
+		bool hdmi_connected = false;
+
+		for (i = 0; i < connector_count; i++) {
+			if (enabled[i] &&
+			    drm_connector_is_hdmi(connectors[i]) &&
+			    connectors[i]->status == connector_status_connected) {
+				hdmi_connected = true;
+				break;
+			}
+		}
+
+		if (hdmi_connected) {
+			DRM_INFO("drm_client: HDMI connected, disabling internal panel\n");
+
+			for (i = 0; i < connector_count; i++) {
+				if (drm_connector_is_internal(connectors[i]))
+					enabled[i] = false;
+			}
+		}
+	}
+
 
 	if (!drm_client_firmware_config(client, connectors, connector_count, crtcs,
 					modes, offsets, enabled, width, height)) {

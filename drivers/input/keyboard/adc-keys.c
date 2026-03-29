@@ -1,14 +1,18 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Input driver for resistor ladder connected on ADC
  *
  * Copyright (c) 2016 Alexandre Belloni
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published by
+ * the Free Software Foundation.
  */
 
 #include <linux/err.h>
 #include <linux/iio/consumer.h>
 #include <linux/iio/types.h>
 #include <linux/input.h>
+#include <linux/input-polldev.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -29,12 +33,15 @@ struct adc_keys_state {
 	const struct adc_keys_button *map;
 };
 
-static void adc_keys_poll(struct input_dev *input)
+extern void rk_send_key_f_key_up(void);
+extern void rk_send_key_f_key_down(void);
+
+static void adc_keys_poll(struct input_polled_dev *dev)
 {
-	struct adc_keys_state *st = input_get_drvdata(input);
+	struct adc_keys_state *st = dev->private;
 	int i, value, ret;
 	u32 diff, closest = 0xffffffff;
-	int keycode = 0;
+	u32 keycode = 0;
 
 	ret = iio_read_channel_processed(st->channel, &value);
 	if (unlikely(ret < 0)) {
@@ -53,13 +60,21 @@ static void adc_keys_poll(struct input_dev *input)
 	if (abs(st->keyup_voltage - value) < closest)
 		keycode = 0;
 
-	if (st->last_key && st->last_key != keycode)
-		input_report_key(input, st->last_key, 0);
+	if (st->last_key && st->last_key != keycode) {
+		if (st->last_key == BTN_MODE)
+			rk_send_key_f_key_down();
+		else
+			input_report_key(dev->input, st->last_key, 0);
+	}
 
-	if (keycode)
-		input_report_key(input, keycode, 1);
+	if (keycode) {
+		if (keycode == BTN_MODE)
+			rk_send_key_f_key_up();
+		else
+			input_report_key(dev->input, keycode, 1);
+	}
 
-	input_sync(input);
+	input_sync(dev->input);
 	st->last_key = keycode;
 }
 
@@ -107,6 +122,7 @@ static int adc_keys_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct adc_keys_state *st;
+	struct input_polled_dev *poll_dev;
 	struct input_dev *input;
 	enum iio_chan_type type;
 	int i, value;
@@ -143,13 +159,19 @@ static int adc_keys_probe(struct platform_device *pdev)
 	if (error)
 		return error;
 
-	input = devm_input_allocate_device(dev);
-	if (!input) {
+	poll_dev = devm_input_allocate_polled_device(dev);
+	if (!poll_dev) {
 		dev_err(dev, "failed to allocate input device\n");
 		return -ENOMEM;
 	}
 
-	input_set_drvdata(input, st);
+	if (!device_property_read_u32(dev, "poll-interval", &value))
+		poll_dev->poll_interval = value;
+
+	poll_dev->poll = adc_keys_poll;
+	poll_dev->private = st;
+
+	input = poll_dev->input;
 
 	input->name = pdev->name;
 	input->phys = "adc-keys/input0";
@@ -161,22 +183,13 @@ static int adc_keys_probe(struct platform_device *pdev)
 
 	__set_bit(EV_KEY, input->evbit);
 	for (i = 0; i < st->num_keys; i++)
-		__set_bit(st->map[i].keycode, input->keybit);
+		if (st->map[i].keycode != BTN_MODE)
+			__set_bit(st->map[i].keycode, input->keybit);
 
 	if (device_property_read_bool(dev, "autorepeat"))
 		__set_bit(EV_REP, input->evbit);
 
-
-	error = input_setup_polling(input, adc_keys_poll);
-	if (error) {
-		dev_err(dev, "Unable to set up polling: %d\n", error);
-		return error;
-	}
-
-	if (!device_property_read_u32(dev, "poll-interval", &value))
-		input_set_poll_interval(input, value);
-
-	error = input_register_device(input);
+	error = input_register_polled_device(poll_dev);
 	if (error) {
 		dev_err(dev, "Unable to register input device: %d\n", error);
 		return error;
