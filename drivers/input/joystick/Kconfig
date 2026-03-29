@@ -384,11 +384,11 @@ config JOYSTICK_FSIA6B
 	  module will be called fsia6b.
 
 config JOYSTICK_RK3562
-	tristate "RK3562 handheld gamepad (RG56 Pro, RG43H Pro, etc.)"
+	tristate "RK3562 handheld gamepad (RG52 Mini, RG43H Pro, etc.)"
 	depends on IIO
 	select INPUT_FF_MEMLESS
 	help
-	  Say Y here if you have an RK3562-based handheld (Anbernic RG56 Pro,
+	  Say Y here if you have an RK3562-based handheld (AISLPC RG52 Mini,
 	  RG43H Pro, etc.) and want to use its built-in gamepad. The driver
 	  reads analog sticks and triggers via SARADC IIO channels,
 	  ADC-threshold buttons, and GPIO-connected buttons. The number of

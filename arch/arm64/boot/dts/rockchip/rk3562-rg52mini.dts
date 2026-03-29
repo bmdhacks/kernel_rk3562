@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2024 dArkOS Contributors
  *
- * AISLPC RG56 Pro — RK3562 gaming handheld with portrait 720x1280 DSI panel
+ * AISLPC RG52 Mini — RK3562 gaming handheld with portrait 720x1280 DSI panel
  */
 
 /dts-v1/;
@@ -13,8 +13,8 @@
 #include "rk3562-darkos.dtsi"
 
 / {
-	model = "AISLPC RG56 Pro";
-	compatible = "aislpc,rg56pro", "rockchip,rk3562";
+	model = "AISLPC RG52 Mini";
+	compatible = "aislpc,rg52mini", "rockchip,rk3562";
 
 	play_joystick {
 		compatible = "play_joystick";
@@ -162,7 +162,7 @@
 	];
 };
 
-/* RK817 codec — RG56 Pro uses higher headphone volume */
+/* RK817 codec — RG52 Mini uses higher headphone volume */
 &rk817_codec {
 	hp-volume = <54>;
 };

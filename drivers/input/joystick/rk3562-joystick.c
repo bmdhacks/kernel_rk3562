@@ -2,7 +2,7 @@
 /*
  * RK3562 handheld gamepad driver
  *
- * Generic input driver for RK3562-based handheld gamepads (RG56 Pro,
+ * Generic input driver for RK3562-based handheld gamepads (RG52 Mini,
  * RG43H Pro, etc.).  Reads analog sticks and triggers via IIO (SARADC),
  * ADC-threshold buttons via IIO, and GPIO-connected buttons via IRQ
  * with debounce.
@@ -120,7 +120,7 @@ struct rk3562_joystick {
 	bool r_xy_swap;
 
 	/* Left stick polarity inversion (for devices where the left stick
-	 * module is physically rotated 180 degrees, e.g. RG56 Pro) */
+	 * module is physically rotated 180 degrees, e.g. RG52 Mini) */
 	bool left_stick_invert;
 
 	/* Rumble motors (optional) */
@@ -994,7 +994,7 @@ static int rk3562_probe(struct platform_device *pdev)
 
 	/* Always register BTN_TL2 and BTN_MODE so joydev assigns the same
 	 * sequential button indices on all RK3562 devices, regardless of
-	 * whether a physical HOME/FN button exists (RG56 Pro has it,
+	 * whether a physical HOME/FN button exists (RG52 Mini has it,
 	 * RG43H does not).  input_set_capability is idempotent. */
 	input_set_capability(input, EV_KEY, BTN_TL2);
 	input_set_capability(input, EV_KEY, BTN_MODE);

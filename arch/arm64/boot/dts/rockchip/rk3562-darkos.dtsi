@@ -3,7 +3,7 @@
  * Copyright (c) 2024 dArkOS Contributors
  *
  * Shared device tree include for dArkOS gaming handhelds based on
- * Rockchip RK3562 with RK817 PMIC.  Included by both rk3562-rg56pro.dts
+ * Rockchip RK3562 with RK817 PMIC.  Included by both rk3562-rg52mini.dts
  * (portrait 720x1280 panel) and rk3562-rg43h.dts (landscape 1024x768 panel).
  *
  * Per-device DTS files override:
@@ -358,7 +358,7 @@
 		disp_timings0: display-timings {
 			native-mode = <&dsi_timing0>;
 
-			/* Defaults from RG56 Pro; overridden per-device */
+			/* Defaults from RG52 Mini; overridden per-device */
 			dsi_timing0: timing0 {
 				clock-frequency = <76800000>;
 				hactive = <720>;
@@ -744,7 +744,7 @@
 
 	buttons {
 		/*
-		 * All 10 button GPIOs are listed here (RG56 Pro has 10,
+		 * All 10 button GPIOs are listed here (RG52 Mini has 10,
 		 * RG43H Pro has 9).  The joystick driver node is per-device
 		 * and references only the pins it needs via key-gpios.
 		 */
