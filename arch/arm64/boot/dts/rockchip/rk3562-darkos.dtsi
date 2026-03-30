@@ -406,6 +406,10 @@
 	status = "okay";
 };
 
+&rgb_in_vp0 {
+	status = "okay";
+};
+
 &gpu {
 	status = "okay";
 	mali-supply = <&vdd_gpu>;
@@ -502,6 +506,8 @@
 
 &rgb {
 	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&rgb666_pins>;
 
 	ports {
 		port@1 {
