@@ -245,8 +245,6 @@
 		regulator-min-microvolt = <800000>;
 		regulator-max-microvolt = <1100000>;
 		regulator-init-microvolt = <900000>;
-		regulator-always-on;
-		regulator-boot-on;
 		regulator-settling-time-up-us = <250>;
 		pwm-supply = <&vcc_sys>;
 		status = "disabled";
@@ -458,9 +456,7 @@
 	status = "okay";
 };
 
-&pwm6 {
-	status = "okay";
-};
+/* pwm6 left disabled — drives vdd_npu, NPU is unused */
 
 &pwm7 {
 	status = "okay";
@@ -474,14 +470,7 @@
 	status = "okay";
 };
 
-&rknpu {
-	rknpu-supply = <&vdd_npu>;
-	status = "okay";
-};
-
-&rknpu_mmu {
-	status = "okay";
-};
+/* rknpu + rknpu_mmu left disabled — NPU is unused, saves power */
 
 &rkvdec {
 	status = "okay";
@@ -589,7 +578,7 @@
 	cap-sdio-irq;
 	keep-power-in-suspend;
 	mmc-pwrseq = <&sdio_pwrseq>;
-	non-removable;
+	broken-cd;
 	pinctrl-names = "default";
 	pinctrl-0 = <&sdmmc1_bus4 &sdmmc1_cmd &sdmmc1_clk>;
 	sd-uhs-sdr104;
@@ -680,7 +669,7 @@
 &pinctrl {
 	headphone {
 		hp_det: hp-det {
-			rockchip,pins = <0 RK_PA7 RK_FUNC_GPIO &pcfg_pull_none>;
+			rockchip,pins = <0 RK_PA7 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
 	};
 
