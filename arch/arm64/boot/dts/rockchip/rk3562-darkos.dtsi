@@ -624,6 +624,7 @@
 &usbdrd_dwc3 {
 	status = "okay";
 	dr_mode = "otg";
+	extcon = <&u2phy>;
 	maximum-speed = "high-speed";
 	phys = <&u2phy_otg>;
 	phy-names = "usb2-phy";
