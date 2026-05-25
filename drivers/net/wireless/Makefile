@@ -19,7 +19,7 @@ obj-$(CONFIG_WLAN_VENDOR_RSI) += rsi/
 obj-$(CONFIG_WLAN_VENDOR_ST) += st/
 obj-$(CONFIG_WLAN_VENDOR_TI) += ti/
 obj-$(CONFIG_WLAN_VENDOR_ZYDAS) += zydas/
-obj-$(CONFIG_WLAN_VENDOR_ZYDAS) += aic8800/
+obj-$(CONFIG_AIC_WLAN_SUPPORT) += aic8800/
 obj-$(CONFIG_WLAN_VENDOR_QUANTENNA) += quantenna/
 
 # 16-bit wireless PCMCIA client drivers
