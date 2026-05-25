@@ -410,9 +410,39 @@ static ssize_t swap_start_home_store(struct device *dev,
 
 static DEVICE_ATTR_RW(swap_start_home);
 
+/* --- Left stick inversion sysfs --- */
+
+static ssize_t left_stick_invert_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	struct rk3562_joystick *joy = platform_get_drvdata(to_platform_device(dev));
+
+	return sysfs_emit(buf, "%d\n", joy->left_stick_invert);
+}
+
+static ssize_t left_stick_invert_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	struct rk3562_joystick *joy = platform_get_drvdata(to_platform_device(dev));
+	bool val;
+	int ret;
+
+	ret = kstrtobool(buf, &val);
+	if (ret)
+		return ret;
+
+	joy->left_stick_invert = val;
+
+	return count;
+}
+
+static DEVICE_ATTR_RW(left_stick_invert);
+
 static struct attribute *rk3562_attrs[] = {
 	&dev_attr_axis_to_dpad.attr,
 	&dev_attr_swap_start_home.attr,
+	&dev_attr_left_stick_invert.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(rk3562);
