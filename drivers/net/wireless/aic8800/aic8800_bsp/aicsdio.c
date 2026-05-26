@@ -606,11 +606,19 @@ static int aicbsp_platform_power_on(void)
 
 
 #ifdef CONFIG_PLATFORM_ROCKCHIP2
-	//rockchip_wifi_power(0);
+	/*
+	 * No AIC chip enumerated within the timeout. Quiesce the SDIO bus and
+	 * drop the WiFi power rail so a co-resident driver (e.g. rk915) on the
+	 * same wireless-wlan GPIO/SDIO slot is not left fighting a half-
+	 * configured state. Mirrors aicbsp_platform_power_off() below.
+	 */
+	rockchip_wifi_set_carddetect(0);
+	mdelay(200);
+	rockchip_wifi_power(0);
+	mdelay(200);
 #endif /*CONFIG_PLATFORM_ROCKCHIP2*/
 
-	//return -1;
-	return 0;
+	return -1;
 }
 
 static void aicbsp_platform_power_off(void)
