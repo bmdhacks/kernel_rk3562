@@ -138,7 +138,7 @@ struct rk3562_joystick {
 	/* Start/Select <-> HOME/BACK swap */
 	bool swap_start_home;
 	bool swap_available;	/* false if any of the 4 buttons missing */
-	int swap_indices[4];	/* gpio_btns[] indices: START, SELECT, MODE, TL2 */
+	int swap_indices[4];	/* gpio_btns[] indices: START, SELECT, MODE, HAPPY1 */
 };
 
 static const char * const stick_chan_names[NUM_STICK_CHANS] = {
@@ -404,13 +404,13 @@ static ssize_t swap_start_home_store(struct device *dev,
 	if (val != joy->swap_start_home) {
 		/* Pairwise swap: START↔BACK, SELECT↔HOME/FN */
 		joy->gpio_btns[joy->swap_indices[0]].code =
-			val ? BTN_TL2 : BTN_START;     /* START → BACK */
+			val ? BTN_TRIGGER_HAPPY1 : BTN_START;     /* START → BACK */
 		joy->gpio_btns[joy->swap_indices[1]].code =
 			val ? BTN_MODE : BTN_SELECT;   /* SELECT → HOME/FN */
 		joy->gpio_btns[joy->swap_indices[2]].code =
 			val ? BTN_SELECT : BTN_MODE;   /* HOME/FN → SELECT */
 		joy->gpio_btns[joy->swap_indices[3]].code =
-			val ? BTN_START : BTN_TL2;     /* BACK → START */
+			val ? BTN_START : BTN_TRIGGER_HAPPY1;     /* BACK → START */
 		joy->swap_start_home = val;
 	}
 
@@ -719,15 +719,23 @@ static int rk3562_parse_adc_buttons(struct rk3562_joystick *joy,
 
 /*
  * Remap DTS key codes that fall outside the BTN_* range (and would be
- * invisible to joydev) into BTN_MODE/BTN_TL2.
+ * invisible to joydev) into joydev-visible BTN_* codes.
+ *
+ * KEY_HOME -> BTN_MODE (the SDL Guide button).
+ * KEY_FN   -> BTN_TRIGGER_HAPPY1: a generic "extra button" slot in the
+ *             BTN_TRIGGER_HAPPY1..40 range (evdev 0x2c0..0x2e7) that the
+ *             kernel input subsystem reserves for buttons that don't fit
+ *             the standard gamepad layout.  Avoids overloading BTN_TL2
+ *             (the canonical Left Trigger 2 code) for an unrelated
+ *             function button.
  */
 static unsigned int rk3562_remap_code(unsigned int dts_code)
 {
 	switch (dts_code) {
 	case KEY_HOME_DTS:
-		return BTN_MODE;  /* 0x13c -- HOME/FN -> Guide button */
+		return BTN_MODE;            /* 0x13c -- HOME -> Guide */
 	case KEY_FN_DTS:
-		return BTN_TL2;   /* 0x138 -- BACK -> function button */
+		return BTN_TRIGGER_HAPPY1;  /* 0x2c0 -- FN/BACK -> extra btn */
 	default:
 		return dts_code;
 	}
@@ -952,7 +960,7 @@ static int rk3562_probe(struct platform_device *pdev)
 	/* --- Locate swappable buttons for Start/Select <-> HOME/BACK --- */
 	{
 		static const unsigned int swap_codes[4] = {
-			BTN_START, BTN_SELECT, BTN_MODE, BTN_TL2,
+			BTN_START, BTN_SELECT, BTN_MODE, BTN_TRIGGER_HAPPY1,
 		};
 		int found = 0;
 
@@ -973,7 +981,7 @@ static int rk3562_probe(struct platform_device *pdev)
 
 		joy->swap_available = (found == 4);
 		if (joy->swap_available)
-			dev_info(dev, "Button swap available (START=%d SELECT=%d MODE=%d TL2=%d)\n",
+			dev_info(dev, "Button swap available (START=%d SELECT=%d MODE=%d HAPPY1=%d)\n",
 				 joy->swap_indices[0], joy->swap_indices[1],
 				 joy->swap_indices[2], joy->swap_indices[3]);
 		else
