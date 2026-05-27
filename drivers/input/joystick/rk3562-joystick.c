@@ -159,9 +159,18 @@ static const unsigned int stick_abs_codes[NUM_STICK_CHANS] = {
 	ABS_X, ABS_Y, ABS_RX, ABS_RY,
 };
 
-/* Axis ABS codes for triggers */
+/* Axis ABS codes for triggers.
+ *
+ * Per the Linux Gamepad Specification, analog triggers should use
+ * ABS_HAT2Y (left/ZL) and ABS_HAT2X (right/ZR), not ABS_Z/ABS_RZ.
+ * Using ABS_Z/ABS_RZ (codes 0x02/0x05) places the triggers in the
+ * middle of joydev's axis enumeration -- triggers end up at joydev
+ * axes 2 and 5, pushing the right stick to axes 3/4 instead of 2/3.
+ * SDL emulator configs assume the standard SDL_GameController layout
+ * (0/1=left stick, 2/3=right stick, 4/5=triggers), which requires the
+ * triggers to sit at higher evdev codes than the sticks. */
 static const unsigned int trig_abs_codes[NUM_TRIG_CHANS] = {
-	ABS_Z, ABS_RZ,
+	ABS_HAT2Y, ABS_HAT2X,
 };
 
 /*
@@ -1022,11 +1031,18 @@ static int rk3562_probe(struct platform_device *pdev)
 	for (i = 0; i < NUM_ADC_BTNS; i++)
 		input_set_capability(input, EV_KEY, joy->adc_btn_codes[i]);
 
-	/* Always register BTN_TL2 and BTN_MODE so joydev assigns the same
-	 * sequential button indices on all RK3562 devices, regardless of
-	 * whether a physical HOME/FN button exists (RG52 Mini has it,
-	 * RG43H does not).  input_set_capability is idempotent. */
+	/* Always register BTN_TL2, BTN_TR2, and BTN_MODE so joydev assigns
+	 * the same sequential button indices on all RK3562 devices,
+	 * regardless of whether a physical HOME/FN button exists (RG52
+	 * Mini has it, RG43H does not).  BTN_TR2 (evdev 0x139) is set
+	 * unconditionally to fill the gap between BTN_TL2 (0x138) and
+	 * BTN_SELECT (0x13a) -- without it, joydev collapses SELECT to
+	 * button 7 instead of 8, shifting all later buttons (DPAD, etc.)
+	 * down by one and breaking emulator configs that assume the
+	 * standard SDL_GameController layout. input_set_capability is
+	 * idempotent. */
 	input_set_capability(input, EV_KEY, BTN_TL2);
+	input_set_capability(input, EV_KEY, BTN_TR2);
 	input_set_capability(input, EV_KEY, BTN_MODE);
 
 	/* Register dpad button capabilities (for axis-to-dpad mode) */
