@@ -55,7 +55,7 @@
 			    <&gpio0 RK_PC5 GPIO_ACTIVE_LOW>,
 			    <&gpio0 RK_PC6 GPIO_ACTIVE_LOW>;
 		key-gpios-map = <0x136 0x220 0x137 0x130
-				 0x13a 0x13b 0x1d0 0x13d
+				 0x13a 0x13b 0x66  0x13d
 				 0x13e>;
 		l2-r2-min-value-mv = <50>;
 		l2-r2-max-value-mv = <800>;
