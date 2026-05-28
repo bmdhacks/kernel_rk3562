@@ -109,6 +109,54 @@
 	};
 };
 
+/* ---- Chassis fan -------------------------------------------------------- */
+
+/ {
+	/* Fan motor rail -- GPIO0_C3 high enables. Marked regulator-boot-on so
+	 * the rail is powered before pwm-fan probes; without that the fan-supply
+	 * is locked off when pwm-fan tries to spin up. */
+	fan_vcc: fan-vcc {
+		compatible = "regulator-fixed";
+		regulator-name = "fan-vcc";
+		pinctrl-names = "default";
+		pinctrl-0 = <&fan_vcc_en_gpio>;
+		gpios = <&gpio0 RK_PC3 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+	};
+
+	/* pwm-fan consumer -- PWM4 channel 0 drives speed; GPIO2_A1 falling
+	 * edges are tach pulses; rockchip,temp-trips is a BSP extension that
+	 * lets the driver self-manage temp->speed instead of relying on the
+	 * thermal-zone cooling-map (CONFIG_ROCKCHIP_SYSTEM_MONITOR path). */
+	pwm-fan {
+		status = "okay";
+		compatible = "pwm-fan";
+		#cooling-cells = <2>;
+		fan-supply = <&fan_vcc>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&fan_det_gpio>;
+		interrupt-parent = <&gpio2>;
+		interrupts = <RK_PA1 IRQ_TYPE_EDGE_FALLING>;
+		pwms = <&pwm4 0 50000 0>;
+		cooling-levels = <0 50 100 150 200 255>;
+		rockchip,temp-trips = <50000 1
+				       55000 2
+				       60000 3
+				       65000 4
+				       70000 5>;
+	};
+};
+
+/* Activate PWM4 channel 0 on the pwm4_m1 route (GPIO1_D1, mux 4) so the
+ * pwm-fan consumer above can drive the motor. RG52 Mini-only -- the shared
+ * darkos.dtsi leaves &pwm4 disabled. */
+&pwm4 {
+	pinctrl-names = "active";
+	pinctrl-0 = <&pwm4m1_pins>;
+	status = "okay";
+};
+
 /* ---- Per-device overrides ------------------------------------------------ */
 
 /* LCD voltage regulator — GPIO0_B0 active-low enable */

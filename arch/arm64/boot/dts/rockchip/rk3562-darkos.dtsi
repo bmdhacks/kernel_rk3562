@@ -262,7 +262,10 @@
 	wireless-wlan {
 		compatible = "wlan-platdata";
 		rockchip,grf = <&sys_grf>;
-		wifi_chip_type = "rk915";
+		/* Rev A is RK915, rev B is AIC8800D80. rfkill is the only consumer
+		 * and only prefix-matches "rtl..."; aic8800 binds by SDIO vendor ID.
+		 * "aic8800D80" matches the silicon (fmacfw_8800d80_h_u02.bin). */
+		wifi_chip_type = "aic8800D80";
 		pinctrl-names = "default";
 		pinctrl-0 = <&wifi_host_wake_irq &wifi_poweren_gpio>;
 		WIFI,host_wake_irq = <&gpio0 RK_PB4 GPIO_ACTIVE_HIGH>;
@@ -455,6 +458,9 @@
 &mpp_srv {
 	status = "okay";
 };
+
+/* pwm4 is enabled per-device -- only the RG52 Mini uses it (chassis fan).
+ * RG43H Pro has no fan, so we don't claim GPIO1_D1 there. */
 
 &pwm5 {
 	status = "okay";
@@ -727,6 +733,16 @@
 	vcc-led {
 		led_en_gpio: led-en-gpio {
 			rockchip,pins = <0 RK_PC7 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	fan {
+		fan_vcc_en_gpio: fan-vcc-en-gpio {
+			rockchip,pins = <0 RK_PC3 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		fan_det_gpio: fan-det-gpio {
+			rockchip,pins = <2 RK_PA1 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
 	};
 
