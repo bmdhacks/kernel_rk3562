@@ -472,6 +472,17 @@
 	status = "okay";
 };
 
+/* uart1 (ttyS1) -- TX-only serial link to the analog-stick RGB LED MCU.
+ * Enabled on both devices; the LED feature itself is OFF by default (the
+ * vcc-led rail stays down until the user turns it on from Options > LED
+ * Settings). Only uart1_tx is muxed (see mcu_uart_tx) so the RG52 Mini fan
+ * keeps GPIO1_D1. /usr/local/bin/ledctl drives it at 9600 8N1. */
+&uart1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&mcu_uart_tx>;
+	status = "okay";
+};
+
 &rga2 {
 	status = "okay";
 };
@@ -733,6 +744,17 @@
 	vcc-led {
 		led_en_gpio: led-en-gpio {
 			rockchip,pins = <0 RK_PC7 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	stick-led-mcu {
+		/* uart1_tx_m0 (GPIO1_D2) ONLY. The stick-RGB LED MCU is a
+		 * write-only target (the mcu_led protocol never reads), so we
+		 * deliberately do NOT mux uart1_rx_m0 (GPIO1_D1). That leaves
+		 * GPIO1_D1 free for the RG52 Mini chassis fan (pwm4_m1), so the
+		 * fan and the LED MCU coexist on one UART pin pair. */
+		mcu_uart_tx: mcu-uart-tx {
+			rockchip,pins = <1 RK_PD2 1 &pcfg_pull_up>;
 		};
 	};
 
