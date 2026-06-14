@@ -159,18 +159,26 @@ static const unsigned int stick_abs_codes[NUM_STICK_CHANS] = {
 	ABS_X, ABS_Y, ABS_RX, ABS_RY,
 };
 
-/* Axis ABS codes for triggers.
+/* Axis ABS codes for triggers: ABS_Z (left/L2) and ABS_RZ (right/R2).
  *
- * Per the Linux Gamepad Specification, analog triggers should use
- * ABS_HAT2Y (left/ZL) and ABS_HAT2X (right/ZR), not ABS_Z/ABS_RZ.
- * Using ABS_Z/ABS_RZ (codes 0x02/0x05) places the triggers in the
- * middle of joydev's axis enumeration -- triggers end up at joydev
- * axes 2 and 5, pushing the right stick to axes 3/4 instead of 2/3.
- * SDL emulator configs assume the standard SDL_GameController layout
- * (0/1=left stick, 2/3=right stick, 4/5=triggers), which requires the
- * triggers to sit at higher evdev codes than the sticks. */
+ * These are the canonical Linux analog-trigger codes, exposed as real
+ * analog axes by BOTH consumers we care about: SDL2 auto-maps
+ * ABS_Z->lefttrigger / ABS_RZ->righttrigger, and RetroArch's udev
+ * joypad driver applies its trigger fix-up (neg_trigger detection +
+ * (val+0x7fff)/2 remap) to give a clean 0..max range for our
+ * rest-at-0 triggers.
+ *
+ * We previously used ABS_HAT2Y/ABS_HAT2X (the Gamepad-spec ZL/ZR
+ * codes) to keep joydev's axis order at 0-3=sticks, 4/5=triggers.
+ * But udev treats the ABS_HAT range (0x10-0x17) as a digital hat, so
+ * RetroArch could only bind them as h2down/h2right -- no analog value
+ * ever reached cores like Flycast. ABS_Z (0x02) sits between the
+ * sticks, so joydev/SDL now enumerate axes as
+ * 0=LX,1=LY,2=L2,3=RX,4=RY,5=R2; every index-based config
+ * (gamecontrollerdb, es_input, mupen, dolphin, retroarch autoconfig)
+ * was updated to match this layout. */
 static const unsigned int trig_abs_codes[NUM_TRIG_CHANS] = {
-	ABS_HAT2Y, ABS_HAT2X,
+	ABS_Z, ABS_RZ,
 };
 
 /*
