@@ -54,7 +54,10 @@
 			    <&gpio1 RK_PD4 GPIO_ACTIVE_LOW>,
 			    <&gpio0 RK_PC5 GPIO_ACTIVE_LOW>,
 			    <&gpio0 RK_PC6 GPIO_ACTIVE_LOW>;
-		key-gpios-map = <0x136 0x220 0x137 0x130
+		/* 4th GPIO (gpio1 PD6) = A button (East) -> BTN_EAST 0x131.
+		 * Physical B (South) is the ADC b-key -> BTN_SOUTH 0x130.
+		 * Compass-correct: East emits EAST, South emits SOUTH. */
+		key-gpios-map = <0x136 0x220 0x137 0x131
 				 0x13a 0x13b 0x66  0x13d
 				 0x13e>;
 		l2-r2-min-value-mv = <50>;
@@ -86,7 +89,8 @@
 		b-key {
 			label = "b-key";
 			adc-chan = <5>;
-			linux,code = <0x131>;
+			/* physical B = South button -> BTN_SOUTH (compass-correct) */
+			linux,code = <0x130>;
 			press-threshold-microvolt = <600000>;
 		};
 
