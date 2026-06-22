@@ -72,6 +72,16 @@
 /* Trigger: calibrated fuzz/flat (much smaller than pre-calibration values) */
 #define TRIG_FLAT_CALIBRATED	512
 #define TRIG_FUZZ_CALIBRATED	64
+/* Trigger digital-button thresholds (on the 0..32767 mapped scale).
+ * In addition to the analog ABS_Z/ABS_RZ axes, a firm press latches the
+ * digital BTN_TL2/BTN_TR2 keys so software that wants digital L2/R2
+ * (many PortMaster ports, raw-evdev consumers) keeps working alongside
+ * the analog axis (which SDL/RetroArch bind for emulators). Hysteresis
+ * (press high, release low) prevents chatter near the threshold. The
+ * kernel gamepad spec sanctions reporting a trigger as analog and
+ * digital simultaneously; hid-playstation does the same with ABS_Z/RZ. */
+#define TRIG_BTN_PRESS_THRESH	21000	/* latch at ~64% of 32767 */
+#define TRIG_BTN_RELEASE_THRESH	14000	/* release at ~43% of 32767 */
 
 /* DTS key codes that need remapping to BTN_* range for joydev visibility */
 #define KEY_HOME_DTS	102
@@ -114,6 +124,10 @@ struct rk3562_joystick {
 	/* Trigger calibration (millivolts from DTS, converted to microvolts) */
 	int trig_min_uv;
 	int trig_max_uv[NUM_TRIG_CHANS];  /* per-trigger resting voltage */
+
+	/* Digital BTN_TL2/BTN_TR2 latch state (hysteresis on the analog
+	 * trigger value, so L2/R2 are reported as both axis and button) */
+	bool trig_btn_pressed[NUM_TRIG_CHANS];
 
 	/* Axis X/Y swap flags */
 	bool l_xy_swap;
@@ -179,6 +193,14 @@ static const unsigned int stick_abs_codes[NUM_STICK_CHANS] = {
  * was updated to match this layout. */
 static const unsigned int trig_abs_codes[NUM_TRIG_CHANS] = {
 	ABS_Z, ABS_RZ,
+};
+
+/* Digital button codes for the triggers, reported in parallel with the
+ * analog axes above (thresholded with hysteresis -- see rk3562_poll).
+ * BTN_TL2/BTN_TR2 are already registered as capabilities at probe time
+ * for joydev index stability; here they become actively driven. */
+static const unsigned int trig_btn_codes[NUM_TRIG_CHANS] = {
+	BTN_TL2, BTN_TR2,
 };
 
 /*
@@ -489,15 +511,29 @@ static void rk3562_poll(struct input_dev *input)
 		stick_vals[i] = rk3562_map_stick(joy, raw, i);
 	}
 
-	/* Step 2: Read and report triggers */
+	/* Step 2: Read and report triggers as both an analog axis (ABS_Z/
+	 * ABS_RZ) and a thresholded digital button (BTN_TL2/BTN_TR2) with
+	 * hysteresis, so analog- and digital-L2/R2 consumers both work. */
 	for (i = 0; i < NUM_TRIG_CHANS; i++) {
+		int mapped;
+
 		ret = iio_read_channel_processed(joy->trig_chans[i], &raw);
 		if (ret < 0)
 			continue;
 
 		raw *= 1000;
-		input_report_abs(input, trig_abs_codes[i],
-				 rk3562_map_trigger(joy, raw, i));
+		mapped = rk3562_map_trigger(joy, raw, i);
+		input_report_abs(input, trig_abs_codes[i], mapped);
+
+		/* Digital button: latch high, release low (hysteresis) */
+		if (joy->trig_btn_pressed[i]) {
+			if (mapped < TRIG_BTN_RELEASE_THRESH)
+				joy->trig_btn_pressed[i] = false;
+		} else if (mapped >= TRIG_BTN_PRESS_THRESH) {
+			joy->trig_btn_pressed[i] = true;
+		}
+		input_report_key(input, trig_btn_codes[i],
+				 joy->trig_btn_pressed[i]);
 	}
 
 	/* Step 3: Read and report ADC-threshold buttons */
@@ -1056,7 +1092,8 @@ static int rk3562_probe(struct platform_device *pdev)
 	 * button 7 instead of 8, shifting all later buttons (DPAD, etc.)
 	 * down by one and breaking emulator configs that assume the
 	 * standard SDL_GameController layout. input_set_capability is
-	 * idempotent. */
+	 * idempotent.  BTN_TL2/BTN_TR2 are additionally driven as digital
+	 * triggers by rk3562_poll (alongside the ABS_Z/ABS_RZ axes). */
 	input_set_capability(input, EV_KEY, BTN_TL2);
 	input_set_capability(input, EV_KEY, BTN_TR2);
 	input_set_capability(input, EV_KEY, BTN_MODE);
